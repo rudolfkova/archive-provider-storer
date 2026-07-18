@@ -825,12 +825,23 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 			return 0, err
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		curProviders, balance, err := contract.GetProvidersV1(ctx, deps.api, loopMaster, addr)
-		cancel()
+		const getProvidersMaxAttempts = 3
+		var curProviders []contract.ProviderDataV1
+		var balance tlb.Coins
+		for attempt := 1; attempt <= getProvidersMaxAttempts; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			curProviders, balance, err = contract.GetProvidersV1(ctx, deps.api, loopMaster, addr)
+			cancel()
+			if err == nil || errors.Is(err, contract.ErrNotDeployed) {
+				break
+			}
+			log.Error().Err(err).Str("bag", dt.BagID).Int("attempt", attempt).Msg("failed to get providers")
+			if attempt < getProvidersMaxAttempts {
+				time.Sleep(2 * time.Second)
+			}
+		}
 		if err != nil && !errors.Is(err, contract.ErrNotDeployed) {
-			log.Error().Err(err).Str("bag", dt.BagID).Msg("failed to get providers")
-			return 0, err
+			continue
 		}
 
 		for _, cp := range curProviders {
