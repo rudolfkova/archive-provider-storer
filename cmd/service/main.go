@@ -830,7 +830,7 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 		cancel()
 		if err != nil && !errors.Is(err, contract.ErrNotDeployed) {
 			log.Error().Err(err).Str("bag", dt.BagID).Msg("failed to get providers")
-			return 0, err
+			continue
 		}
 
 		for _, cp := range curProviders {
