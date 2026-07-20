@@ -125,6 +125,9 @@ const (
 	liteserverRequestTimeout = 15 * time.Second
 	masterchainPollInterval  = 2 * time.Second
 	walletTxScanLimit        = 100
+	txConfirmMaxAttempts     = 3
+	txConfirmAttemptTimeout  = 180 * time.Second
+	txConfirmScanRetryDelay  = 2 * time.Second
 )
 
 var (
@@ -1430,32 +1433,61 @@ func bestKnownMasterchainInfo(ctx context.Context, api ton.APIClientWrapped) (*t
 }
 
 func sendManyWaitTransactionFresh(ctx context.Context, wl loopWallet, api ton.APIClientWrapped, messages []*wallet.Message, minSeqno uint32) (*tlb.Transaction, *ton.BlockIDExt, error) {
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+	sendCtx := ctx
+	if _, hasDeadline := sendCtx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 180*time.Second)
+		sendCtx, cancel = context.WithTimeout(ctx, txConfirmAttemptTimeout)
 		defer cancel()
 	}
 
-	ext, err := wl.BuildExternalMessageForMany(ctx, messages)
+	ext, err := wl.BuildExternalMessageForMany(sendCtx, messages)
 	if err != nil {
 		return nil, nil, err
 	}
 	inMsgHash := ext.Body.Hash()
 
-	master, err := waitForMasterchainBlock(ctx, api, minSeqno)
+	master, err := waitForMasterchainBlock(sendCtx, api, minSeqno)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err = api.SendExternalMessage(ctx, ext); err != nil {
+	if err = api.SendExternalMessage(sendCtx, ext); err != nil {
 		return nil, nil, fmt.Errorf("failed to send message: %w", err)
 	}
 
+	nextSeqno := master.SeqNo + 1
 	log.Debug().
 		Str("hash", base64.StdEncoding.EncodeToString(inMsgHash)).
-		Uint32("from_seqno", master.SeqNo+1).
+		Uint32("from_seqno", nextSeqno).
 		Msg("sent external message, waiting for wallet transaction")
 
-	return waitForWalletInMsg(ctx, api, wl.WalletAddress(), inMsgHash, master.SeqNo+1)
+	var lastTimeout *txConfirmationTimeoutError
+	for attempt := 1; attempt <= txConfirmMaxAttempts; attempt++ {
+		confirmCtx, cancel := context.WithTimeout(context.Background(), txConfirmAttemptTimeout)
+		tx, block, err := waitForWalletInMsg(confirmCtx, api, wl.WalletAddress(), inMsgHash, nextSeqno)
+		cancel()
+		if err == nil {
+			return tx, block, nil
+		}
+
+		var timeoutErr *txConfirmationTimeoutError
+		if errors.As(err, &timeoutErr) {
+			nextSeqno = timeoutErr.nextSeqno
+			lastTimeout = timeoutErr
+			log.Warn().
+				Err(err).
+				Int("attempt", attempt).
+				Int("max_attempts", txConfirmMaxAttempts).
+				Uint32("from_seqno", nextSeqno).
+				Str("hash", base64.StdEncoding.EncodeToString(inMsgHash)).
+				Msg("wallet tx confirmation timed out, retrying confirm without resend")
+			continue
+		}
+		return nil, nil, err
+	}
+	if lastTimeout != nil {
+		return nil, nil, lastTimeout
+	}
+	return nil, nil, fmt.Errorf("wallet tx confirmation failed")
 }
 
 func waitForWalletInMsg(ctx context.Context, api ton.APIClientWrapped, addr *address.Address, inMsgHash []byte, minSeqno uint32) (*tlb.Transaction, *ton.BlockIDExt, error) {
@@ -1481,7 +1513,16 @@ func waitForWalletInMsg(ctx context.Context, api ton.APIClientWrapped, addr *add
 			return tx, master, nil
 		}
 		if !errors.Is(err, ton.ErrTxWasNotFound) {
-			log.Warn().Err(err).Uint32("seqno", master.SeqNo).Msg("failed to scan wallet transactions")
+			log.Warn().Err(err).Uint32("seqno", master.SeqNo).Msg("failed to scan wallet transactions, retrying same block")
+			select {
+			case <-ctx.Done():
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					return nil, nil, &txConfirmationTimeoutError{nextSeqno: nextSeqno}
+				}
+				return nil, nil, ctx.Err()
+			case <-time.After(txConfirmScanRetryDelay):
+			}
+			continue
 		}
 
 		nextSeqno = master.SeqNo + 1
