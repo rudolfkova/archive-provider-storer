@@ -125,6 +125,14 @@ const (
 	liteserverRequestTimeout = 15 * time.Second
 	masterchainPollInterval  = 2 * time.Second
 	walletTxScanLimit        = 100
+
+	// Must stay in sync with wallet.ConfigHighloadV3 / MessageBuilder below.
+	highloadMessageTTLSec    = 3*60 + 30
+	highloadCreatedAtSkewSec = 30
+
+	txConfirmAfterTTLMargin = 30 * time.Second
+	txConfirmAttemptTimeout = 180 * time.Second
+	txConfirmScanRetryDelay = 2 * time.Second
 )
 
 var (
@@ -1430,32 +1438,73 @@ func bestKnownMasterchainInfo(ctx context.Context, api ton.APIClientWrapped) (*t
 }
 
 func sendManyWaitTransactionFresh(ctx context.Context, wl loopWallet, api ton.APIClientWrapped, messages []*wallet.Message, minSeqno uint32) (*tlb.Transaction, *ton.BlockIDExt, error) {
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+	sendCtx := ctx
+	if _, hasDeadline := sendCtx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 180*time.Second)
+		sendCtx, cancel = context.WithTimeout(ctx, txConfirmAttemptTimeout)
 		defer cancel()
 	}
 
-	ext, err := wl.BuildExternalMessageForMany(ctx, messages)
+	inMsgHash, nextSeqno, err := buildAndSendExternalMany(sendCtx, wl, api, messages, minSeqno)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// External expires around createdAt+TTL ≈ sendTime+(TTL-skew). Wait that long plus a
+	// margin, confirming the same hash only — then allow exactly one resend.
+	confirmFor := time.Duration(highloadMessageTTLSec-highloadCreatedAtSkewSec)*time.Second + txConfirmAfterTTLMargin
+	confirmCtx, cancel := context.WithTimeout(context.Background(), confirmFor)
+	tx, block, err := waitForWalletInMsg(confirmCtx, api, wl.WalletAddress(), inMsgHash, nextSeqno)
+	cancel()
+	if err == nil {
+		return tx, block, nil
+	}
+
+	var timeoutErr *txConfirmationTimeoutError
+	if errors.As(err, &timeoutErr) {
+		nextSeqno = timeoutErr.nextSeqno
+	} else {
+		return nil, nil, err
+	}
+
+	log.Warn().
+		Err(err).
+		Uint32("from_seqno", nextSeqno).
+		Str("hash", base64.StdEncoding.EncodeToString(inMsgHash)).
+		Dur("confirm_for", confirmFor).
+		Msg("wallet tx not confirmed before highload TTL window, resending once")
+
+	resendCtx, cancel := context.WithTimeout(context.Background(), txConfirmAttemptTimeout)
+	defer cancel()
+
+	inMsgHash, nextSeqno, err = buildAndSendExternalMany(resendCtx, wl, api, messages, nextSeqno)
+	if err != nil {
+		return nil, nil, err
+	}
+	return waitForWalletInMsg(resendCtx, api, wl.WalletAddress(), inMsgHash, nextSeqno)
+}
+
+func buildAndSendExternalMany(ctx context.Context, wl loopWallet, api ton.APIClientWrapped, messages []*wallet.Message, minSeqno uint32) ([]byte, uint32, error) {
+	ext, err := wl.BuildExternalMessageForMany(ctx, messages)
+	if err != nil {
+		return nil, 0, err
 	}
 	inMsgHash := ext.Body.Hash()
 
 	master, err := waitForMasterchainBlock(ctx, api, minSeqno)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, err
 	}
 	if err = api.SendExternalMessage(ctx, ext); err != nil {
-		return nil, nil, fmt.Errorf("failed to send message: %w", err)
+		return nil, 0, fmt.Errorf("failed to send message: %w", err)
 	}
 
+	fromSeqno := master.SeqNo + 1
 	log.Debug().
 		Str("hash", base64.StdEncoding.EncodeToString(inMsgHash)).
-		Uint32("from_seqno", master.SeqNo+1).
+		Uint32("from_seqno", fromSeqno).
 		Msg("sent external message, waiting for wallet transaction")
-
-	return waitForWalletInMsg(ctx, api, wl.WalletAddress(), inMsgHash, master.SeqNo+1)
+	return inMsgHash, fromSeqno, nil
 }
 
 func waitForWalletInMsg(ctx context.Context, api ton.APIClientWrapped, addr *address.Address, inMsgHash []byte, minSeqno uint32) (*tlb.Transaction, *ton.BlockIDExt, error) {
@@ -1481,7 +1530,16 @@ func waitForWalletInMsg(ctx context.Context, api ton.APIClientWrapped, addr *add
 			return tx, master, nil
 		}
 		if !errors.Is(err, ton.ErrTxWasNotFound) {
-			log.Warn().Err(err).Uint32("seqno", master.SeqNo).Msg("failed to scan wallet transactions")
+			log.Warn().Err(err).Uint32("seqno", master.SeqNo).Msg("failed to scan wallet transactions, retrying same block")
+			select {
+			case <-ctx.Done():
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					return nil, nil, &txConfirmationTimeoutError{nextSeqno: nextSeqno}
+				}
+				return nil, nil, ctx.Err()
+			case <-time.After(txConfirmScanRetryDelay):
+			}
+			continue
 		}
 
 		nextSeqno = master.SeqNo + 1
@@ -1598,11 +1656,11 @@ func exportStatsToCSV(providerStats []*StatProvider, bagStats []*StatBag, provid
 func initWallet(apiClient wallet.TonAPI, key ed25519.PrivateKey) (*wallet.Wallet, error) {
 	walletAbstractSeqno := uint32(0)
 	w, err := wallet.FromPrivateKey(apiClient, key, wallet.ConfigHighloadV3{
-		MessageTTL: 3*60 + 30,
+		MessageTTL: highloadMessageTTLSec,
 		MessageBuilder: func(ctx context.Context, subWalletId uint32) (id uint32, createdAt int64, err error) {
-			createdAt = time.Now().UTC().Unix() - 30 // something older than last master block, to pass through LS external's time validation
+			createdAt = time.Now().UTC().Unix() - highloadCreatedAtSkewSec // something older than last master block, to pass through LS external's time validation
 			// TODO: store seqno in db
-			id = uint32((createdAt%(3*60+30))<<15) | atomic.AddUint32(&walletAbstractSeqno, 1)%(1<<15)
+			id = uint32((createdAt%int64(highloadMessageTTLSec))<<15) | atomic.AddUint32(&walletAbstractSeqno, 1)%(1<<15)
 			return
 		},
 	})
