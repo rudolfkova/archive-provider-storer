@@ -60,8 +60,6 @@ github.com/xssnick/archive-manager v0.0.0-20260417144816-33cdf770844f h1:UADUTwj
 github.com/xssnick/archive-manager v0.0.0-20260417144816-33cdf770844f/go.mod h1:ReVwVRISjaA/8RNMKdp6fjE0Fz7qzpChOsuzvChSg0I=
 github.com/xssnick/raptorq v1.4.0 h1:Bms8lgT7aEPRP8YBRuS+8w7Cic8GP9BbvFT1NrWvi24=
 github.com/xssnick/raptorq v1.4.0/go.mod h1:mo5n6T4yaqZkNVMWonRuMS0tcyD4XQ6PwwTjaY3ZwQY=
-github.com/xssnick/tonutils-go v1.17.2 h1:WMBjyqJsgnZuc3UU/shxia47DQLjK+3oJtK0Xx2qgIg=
-github.com/xssnick/tonutils-go v1.17.2/go.mod h1:Ind3q0JM2N/63zfWR7rSGmUpUZaiGxregm9nZc/xGx4=
 github.com/xssnick/tonutils-storage v1.5.1 h1:PZnNSHCcqJCsR62mTMoEMOtrYT8rSH4mpxPiGT5SWV8=
 github.com/xssnick/tonutils-storage v1.5.1/go.mod h1:Qc845GrO7lODF86fdkMsUIuu1WyzlhJVHSS1h1lHpAU=
 github.com/xssnick/tonutils-storage-provider v0.4.2 h1:R13BoYK6vZU6uDoGQC/k4M0zatHmKW3ULMyt8JNL6RE=

@@ -1,0 +1,14 @@
+{
+  "wallet_key": "",
+  "network_config_url": "https://ton.org/global.config.json",
+  "storage_url": "http://127.0.0.1:8081",
+  "storage_login": "1",
+  "storage_password": "1",
+  "index_url": "https://archival-dump.ton.org/index/mainnet.json",
+  "limit_bags": 10,
+  "limit_providers": 100,
+  "replicas": 3,
+  "max_bags_per_provider": 10,
+  "max_provider_fill_percent": 90,
+  "no_tx": true
+}

@@ -1,0 +1,704 @@
+package dht
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"github.com/xssnick/tonutils-go/adnl"
+	"github.com/xssnick/tonutils-go/adnl/keys"
+	"github.com/xssnick/tonutils-go/adnl/overlay"
+	"github.com/xssnick/tonutils-go/tl"
+	"net"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newCorrectDhtNode(a byte, b byte, c byte, d byte, port string) (*dhtNode, error) {
+	tPubKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	kId, err := tl.Hash(keys.PublicKeyED25519{Key: tPubKey})
+	if err != nil {
+		return nil, err
+	}
+	resDhtNode := &dhtNode{
+		adnlId:    kId,
+		addr:      net.IPv4(a, b, c, d).To4().String() + ":" + port,
+		serverKey: tPubKey,
+	}
+	return resDhtNode, nil
+}
+
+func TestNode_findNodes(t *testing.T) {
+	tDhtNode, err := newCorrectDhtNode(1, 2, 3, 4, "12356")
+	if err != nil {
+		t.Fatal("failed to prepare test dht node, err: ", err)
+	}
+
+	pubKey, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal("failed to prepare test pub key, err: ", err)
+	}
+	pubKeyAdnl := keys.PublicKeyED25519{Key: pubKey}
+
+	idKey, err := tl.Hash(pubKeyAdnl)
+	if err != nil {
+		t.Fatal("failed to prepare test key id, err: ", err)
+	}
+	tKey := Key{
+		idKey,
+		[]byte("lol"),
+		0,
+	}
+	kId, err := tl.Hash(tKey)
+	if err != nil {
+		t.Fatal("failed to prepare test key id, err: ", err)
+	}
+
+	tNode, err := newCorrectNode(4, 5, 6, 7, 1245)
+	if err != nil {
+		t.Fatal("failed to prepare test node, err: ", err)
+	}
+	t.Run("good response", func(t *testing.T) {
+		gateway := &MockGateway{}
+		client := &Client{
+			gateway: gateway,
+		}
+		gateway.reg = func(addr string, peerKey ed25519.PublicKey) (adnl.Peer, error) {
+			return MockADNL{
+				query: func(ctx context.Context, req, result tl.Serializable) error {
+					switch request := req.(type) {
+					case tl.Raw:
+						var _req FindNode
+						_, err := tl.Parse(&_req, request, true)
+						if err != nil {
+							t.Fatal("failed to prepare test data, err", err)
+						}
+
+						if bytes.Equal(kId, _req.Key) {
+							reflect.ValueOf(result).Elem().Set(reflect.ValueOf(NodesList{[]*Node{tNode}}))
+						} else {
+							t.Fatal("bad request received")
+						}
+					default:
+						return fmt.Errorf("mock err: unsupported request type '%s'", reflect.TypeOf(request).String())
+					}
+					return nil
+				},
+			}, nil
+		}
+
+		tDhtNode.client = client
+		nodesL, err := tDhtNode.findNodes(context.Background(), kId, 10)
+		if err != nil {
+			t.Fatal("failed to execute findNodes func, err: ", err)
+		}
+		if reflect.DeepEqual(nodesL[0], tNode) != true {
+			t.Error("bad node received")
+		}
+	})
+
+	t.Run("bad response", func(t *testing.T) {
+		gateway := &MockGateway{}
+		client := &Client{
+			gateway: gateway,
+		}
+		gateway.reg = func(addr string, peerKey ed25519.PublicKey) (adnl.Peer, error) {
+			return MockADNL{
+				query: func(ctx context.Context, req, result tl.Serializable) error {
+					switch request := req.(type) {
+					case tl.Raw:
+						var _req FindNode
+						_, err := tl.Parse(&_req, request, true)
+						if err != nil {
+							t.Fatal("failed to prepare test data, err", err)
+						}
+
+						if bytes.Equal(kId, _req.Key) {
+							reflect.ValueOf(result).Elem().Set(reflect.ValueOf(Pong{}))
+						} else {
+							t.Fatal("bad request received")
+						}
+					default:
+						return fmt.Errorf("mock err: unsupported request type '%s'", reflect.TypeOf(request).String())
+					}
+					return nil
+				},
+			}, nil
+		}
+		tDhtNode.client = client
+
+		_, err := tDhtNode.findNodes(context.Background(), kId, 10)
+		if err == nil {
+			t.Error("got error nil, want error not nil")
+		}
+		if strings.Contains(err.Error(), "unexpected response") != true {
+			t.Errorf("got unexcpected error '%s', want unexpected response", err.Error())
+		}
+	})
+
+	t.Run("untrusted nodes list response", func(t *testing.T) {
+		badNode := *tNode
+		badNode.Signature = []byte("bad-signature")
+
+		gateway := &MockGateway{}
+		client := &Client{
+			gateway:   gateway,
+			networkID: _UnknownNetworkID,
+		}
+		gateway.reg = func(addr string, peerKey ed25519.PublicKey) (adnl.Peer, error) {
+			return MockADNL{
+				query: func(ctx context.Context, req, result tl.Serializable) error {
+					switch request := req.(type) {
+					case tl.Raw:
+						var _req FindNode
+						_, err := tl.Parse(&_req, request, true)
+						if err != nil {
+							t.Fatal("failed to prepare test data, err", err)
+						}
+
+						if bytes.Equal(kId, _req.Key) {
+							reflect.ValueOf(result).Elem().Set(reflect.ValueOf(NodesList{[]*Node{&badNode}}))
+						} else {
+							t.Fatal("bad request received")
+						}
+					default:
+						return fmt.Errorf("mock err: unsupported request type '%s'", reflect.TypeOf(request).String())
+					}
+					return nil
+				},
+			}, nil
+		}
+
+		tDhtNode.client = client
+		_, err := tDhtNode.findNodes(context.Background(), kId, 10)
+		if err == nil {
+			t.Fatal("got error nil, want error not nil")
+		}
+		if !strings.Contains(err.Error(), "untrusted nodes list response") {
+			t.Fatalf("got unexpected error %q", err.Error())
+		}
+	})
+}
+
+func TestNode_CheckSignatureExtendedNetworkID(t *testing.T) {
+	node, err := newCorrectNode(1, 2, 3, 4, 12345)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signature := append([]byte{}, node.Signature...)
+	node.Signature = make([]byte, 4+len(signature))
+	binary.LittleEndian.PutUint32(node.Signature[:4], uint32(17))
+	copy(node.Signature[4:], signature)
+
+	if err = node.CheckSignatureWithNetworkID(17); err != nil {
+		t.Fatalf("failed to validate node with correct network id: %v", err)
+	}
+
+	if err = node.CheckSignatureWithNetworkID(18); err == nil || !strings.Contains(err.Error(), "wrong network id") {
+		t.Fatalf("got unexpected error %v", err)
+	}
+}
+
+func TestNode_storeValue(t *testing.T) {
+	tDhtNode, err := newCorrectDhtNode(1, 2, 3, 4, "12356")
+	if err != nil {
+		t.Fatal("failed to prepare test dht node, err: ", err)
+	}
+
+	hexAddr := "516618cf6cbe9004f6883e742c9a2e3ca53ed02e3e36f4cef62a98ee1e449174"
+	siteAddr, err := hex.DecodeString(hexAddr)
+	if err != nil {
+		t.Fatal("failed to prepare test site address, err: ", err.Error())
+	}
+
+	valFound, err := correctValue(siteAddr)
+	if err != nil {
+		t.Fatal("failed to prepare test value")
+	}
+
+	val := valFound.Value
+
+	kId, err := tl.Hash(val.KeyDescription.Key)
+	if err != nil {
+		t.Fatal("failed to prepare test key id, err: ", err)
+	}
+
+	t.Run("good response", func(t *testing.T) {
+		gateway := &MockGateway{}
+		client := &Client{
+			gateway: gateway,
+		}
+		gateway.reg = func(addr string, peerKey ed25519.PublicKey) (adnl.Peer, error) {
+			return MockADNL{
+				query: func(ctx context.Context, req, result tl.Serializable) error {
+					switch request := req.(type) {
+					case tl.Raw:
+						var _req Store
+						_, err := tl.Parse(&_req, request, true)
+						if err != nil {
+							t.Fatal("failed to prepare test data, err", err)
+						}
+
+						if reflect.DeepEqual(val, *_req.Value) {
+							reflect.ValueOf(result).Elem().Set(reflect.ValueOf(Stored{}))
+						} else {
+							t.Fatal("bad request received")
+						}
+					default:
+						return fmt.Errorf("mock err: unsupported request type '%s'", reflect.TypeOf(request).String())
+					}
+					return nil
+				},
+			}, nil
+		}
+		tDhtNode.client = client
+
+		err := tDhtNode.storeValue(context.Background(), kId, &val)
+		if err != nil {
+			t.Fatal("failed to execute storeValue func, err: ", err)
+		}
+	})
+
+	t.Run("bad response", func(t *testing.T) {
+		gateway := &MockGateway{}
+		client := &Client{
+			gateway: gateway,
+		}
+		gateway.reg = func(addr string, peerKey ed25519.PublicKey) (adnl.Peer, error) {
+			return MockADNL{
+				query: func(ctx context.Context, req, result tl.Serializable) error {
+					switch request := req.(type) {
+					case tl.Raw:
+						var _req Store
+						_, err := tl.Parse(&_req, request, true)
+						if err != nil {
+							t.Fatal("failed to prepare test data, err", err)
+						}
+
+						if reflect.DeepEqual(val, *_req.Value) {
+							reflect.ValueOf(result).Elem().Set(reflect.ValueOf(Pong{}))
+						} else {
+							t.Fatal("bad request received")
+						}
+					default:
+						return fmt.Errorf("mock err: unsupported request type '%s'", reflect.TypeOf(request).String())
+					}
+					return nil
+				},
+			}, nil
+		}
+		tDhtNode.client = client
+
+		err := tDhtNode.storeValue(context.Background(), kId, &val)
+		if err == nil {
+			t.Error("got error nil, want error not nil")
+		}
+		if strings.Contains(err.Error(), "unexpected response") != true {
+			t.Errorf("got unexcpected error '%s', want unexpected response", err.Error())
+		}
+	})
+}
+
+func TestNode_findValue(t *testing.T) {
+	existingValue := "516618cf6cbe9004f6883e742c9a2e3ca53ed02e3e36f4cef62a98ee1e449174"
+	siteAddr, err := hex.DecodeString(existingValue)
+	if err != nil {
+		t.Fatal("failed to prepare test site address, err: ", err.Error())
+	}
+
+	var typeValue any
+	typeValue = &Value{}
+	var typeNode any
+	typeNode = []*Node{}
+
+	tValue, err := correctValue(siteAddr)
+	if err != nil {
+		t.Fatal("failed to prepare test value, err:")
+	}
+
+	var tNodesList []*Node
+	tNode, err := newCorrectNode(8, 8, 8, 8, 12345)
+	if err != nil {
+		t.Fatal("failed creating test node, err: ", err.Error())
+	}
+	tNodesList = append(tNodesList, tNode)
+
+	tests := []struct {
+		name, addr string
+		wantType   any
+	}{
+		{"existing address", "516618cf6cbe9004f6883e742c9a2e3ca53ed02e3e36f4cef62a98ee1e449174", typeValue},
+		{"missing address", "1537ee02d6d0a65185630084427a26eafdc11ad24566d835291a43b780701f0e", typeNode},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gateway := &MockGateway{}
+			gateway.reg = func(addr string, peerKey ed25519.PublicKey) (adnl.Peer, error) {
+				return MockADNL{
+					query: func(ctx context.Context, req, result tl.Serializable) error {
+						switch request := req.(type) {
+						case Ping:
+							reflect.ValueOf(result).Elem().Set(reflect.ValueOf(Pong{ID: request.ID}))
+						case tl.Raw:
+							var _req FindValue
+							_, err := tl.Parse(&_req, request, true)
+							if err != nil {
+								t.Fatal("failed to prepare test data, err", err)
+							}
+
+							k, err := tl.Hash(&Key{
+								ID:    siteAddr,
+								Name:  []byte("address"),
+								Index: 0,
+							})
+							if err != nil {
+								t.Fatal(err)
+							}
+
+							if bytes.Equal(k, _req.Key) {
+								reflect.ValueOf(result).Elem().Set(reflect.ValueOf(*tValue))
+							} else {
+								reflect.ValueOf(result).Elem().Set(reflect.ValueOf(ValueNotFoundResult{Nodes: NodesList{tNodesList}}))
+							}
+						default:
+							return fmt.Errorf("mock err: unsupported request type '%s'", reflect.TypeOf(request).String())
+						}
+						return nil
+					},
+				}, nil
+			}
+
+			cli, err := NewClientFromConfig(gateway, cnf)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			time.Sleep(2 * time.Second)
+
+			var testNode *dhtNode
+		loop:
+			for _, b := range cli.buckets {
+				for _, node := range b.getNodes() {
+					if node != nil {
+						testNode = node
+						break loop
+					}
+				}
+			}
+
+			siteAddr, err := hex.DecodeString(test.addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			k := &Key{
+				ID:    siteAddr,
+				Name:  []byte("address"),
+				Index: 0,
+			}
+			testId, keyErr := tl.Hash(k)
+			if keyErr != nil {
+				t.Fatal("failed to prepare test id, err: ", keyErr)
+			}
+
+			res, err := testNode.findValue(context.Background(), testId, 12)
+			if err != nil {
+				t.Fatal("failed execution findValueRaw, err: ", err)
+			}
+
+			if reflect.TypeOf(res) != reflect.TypeOf(test.wantType) {
+				t.Errorf("got type '%s', want '%s'", reflect.TypeOf(res).String(), reflect.TypeOf(test.wantType).String())
+			}
+
+			switch test.name {
+			case "existing address":
+				if !reflect.DeepEqual(*res.(*Value), tValue.Value) {
+					t.Errorf("got bad data")
+				}
+			case "missing address":
+				if !reflect.DeepEqual(res.([]*Node)[0], tNodesList[0]) {
+					t.Errorf("got bad data")
+				}
+			default:
+				t.Fatal("test error: unsupported test name")
+			}
+		})
+	}
+}
+
+func TestNode_checkValue(t *testing.T) {
+	hexAddr := "516618cf6cbe9004f6883e742c9a2e3ca53ed02e3e36f4cef62a98ee1e449174"
+	siteAddr, err := hex.DecodeString(hexAddr)
+	if err != nil {
+		t.Fatal("failed to prepare test site address, err: ", err.Error())
+	}
+
+	valFound, err := correctValue(siteAddr)
+	if err != nil {
+		t.Fatal("failed to prepare test value")
+	}
+
+	val := valFound.Value
+
+	kId, err := tl.Hash(val.KeyDescription.Key)
+	if err != nil {
+		t.Fatal("failed to prepare test key id, err: ", err)
+	}
+
+	t.Run("correct value", func(t *testing.T) {
+		testVal := val
+		err = checkValue(kId, &testVal)
+		if err != nil {
+			t.Fatal("failed to execute checkValue func, err: ", err)
+		}
+	})
+
+	t.Run("corrupted value: bad value sign", func(t *testing.T) {
+		testVal := val
+		testVal.Signature = []byte("qewrgheau;igqn41463[8u9y1436h1[iu1gh[8935]988hg]q5")
+		err = checkValue(kId, &testVal)
+		if err == nil {
+			t.Error("got error nil, want error not nil")
+		}
+		if strings.Contains(err.Error(), "value's signature not match key") != true {
+			t.Errorf("got unexcpected error '%s', want signature not match key", err.Error())
+		}
+	})
+
+	t.Run("corrupted value: too big", func(t *testing.T) {
+		testVal := val
+		testVal.Data = make([]byte, _MaxValueSize+1)
+		err = checkValue(kId, &testVal)
+		if err == nil {
+			t.Fatal("got error nil, want error not nil")
+		}
+		if !strings.Contains(err.Error(), "too big value") {
+			t.Fatalf("got unexpected error %q", err.Error())
+		}
+	})
+
+	t.Run("anybody rule cannot have signature", func(t *testing.T) {
+		testID := keys.PublicKeyUnEnc{Key: []byte("anybody")}
+		testVal, testKeyID, err := buildStoreValue(testID, []byte("test"), 0, []byte("value"), UpdateRuleAnybody{}, time.Minute, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testVal.Signature = []byte{1}
+		err = checkValue(testKeyID, &testVal)
+		if err == nil {
+			t.Fatal("got error nil, want error not nil")
+		}
+		if !strings.Contains(err.Error(), "cannot have signature in DhtUpdateRuleAnybody") {
+			t.Fatalf("got unexpected error %q", err.Error())
+		}
+	})
+
+	t.Run("anybody rule rejects ed25519 key", func(t *testing.T) {
+		pub, _, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testVal, testKeyID, err := buildStoreValue(keys.PublicKeyED25519{Key: pub}, []byte("test"), 0, []byte("value"), UpdateRuleAnybody{}, time.Minute, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = checkValue(testKeyID, &testVal)
+		if err == nil {
+			t.Fatal("got error nil, want error not nil")
+		}
+		if !strings.Contains(err.Error(), "invalid key type for DhtUpdateRuleAnybody") {
+			t.Fatalf("got unexpected error %q", err.Error())
+		}
+	})
+
+	t.Run("anybody rule rejects overlay key", func(t *testing.T) {
+		testVal, testKeyID, err := buildStoreValue(keys.PublicKeyOverlay{Key: []byte("overlay")}, []byte("test"), 0, []byte("value"), UpdateRuleAnybody{}, time.Minute, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = checkValue(testKeyID, &testVal)
+		if err == nil {
+			t.Fatal("got error nil, want error not nil")
+		}
+		if !strings.Contains(err.Error(), "invalid key type for DhtUpdateRuleAnybody") {
+			t.Fatalf("got unexpected error %q", err.Error())
+		}
+	})
+
+	t.Run("overlay nodes rule cannot have signature", func(t *testing.T) {
+		testVal, testKeyID := newCorrectOverlayValue(t, false)
+		testVal.Signature = []byte{1}
+		err = checkValue(testKeyID, testVal)
+		if err == nil {
+			t.Fatal("got error nil, want error not nil")
+		}
+		if !strings.Contains(err.Error(), "cannot have signature in DhtUpdateRuleOverlayNodes") {
+			t.Fatalf("got unexpected error %q", err.Error())
+		}
+	})
+
+	t.Run("overlay nodes rule bad overlay id", func(t *testing.T) {
+		testVal, testKeyID := newCorrectOverlayValue(t, true)
+		err = checkValue(testKeyID, testVal)
+		if err == nil {
+			t.Fatal("got error nil, want error not nil")
+		}
+		if !strings.Contains(err.Error(), "bad overlay id") {
+			t.Fatalf("got unexpected error %q", err.Error())
+		}
+	})
+
+	t.Run("overlay nodes rule wrong network id", func(t *testing.T) {
+		testVal, testKeyID := newCorrectOverlayValue(t, false)
+
+		var nodes overlay.NodesList
+		if _, err = tl.Parse(&nodes, testVal.Data, true); err != nil {
+			t.Fatal(err)
+		}
+
+		signature := append([]byte{}, nodes.List[0].Signature...)
+		nodes.List[0].Signature = make([]byte, 4+len(signature))
+		binary.LittleEndian.PutUint32(nodes.List[0].Signature[:4], uint32(17))
+		copy(nodes.List[0].Signature[4:], signature)
+
+		testVal.Data, err = tl.Serialize(nodes, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = checkValueWithNetworkID(testKeyID, testVal, 18)
+		if err == nil {
+			t.Fatal("got error nil, want error not nil")
+		}
+		if !strings.Contains(err.Error(), "wrong network id") {
+			t.Fatalf("got unexpected error %q", err.Error())
+		}
+
+		if err = checkValueWithNetworkID(testKeyID, testVal, 17); err != nil {
+			t.Fatalf("failed to validate overlay nodes with correct network id: %v", err)
+		}
+	})
+
+	//t.Run("corrupted value: bad value description sign", func(t *testing.T) {
+	//	val.KeyDescription.ID = []byte("qewrgheau;igqn41463[8u9y1436h1[iu1gh[8935]988hg]q5")
+	//	err = checkValue(kId, &val)
+	//if err == nil {
+	//	t.Error("got error nil, want error not nil")
+	//}
+	//if strings.Contains(err.Error(), "key description's signature not match key") != true {
+	//	t.Errorf("got unexcpected error '%s', want signature not match key", err.Error())
+	//}
+	//})
+}
+
+func TestNode_isValueAcceptableOverlayNodesAge(t *testing.T) {
+	now := time.Now().Unix()
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		version int64
+		want    bool
+	}{
+		{
+			name:    "fresh within twenty minutes",
+			version: now - _MaxOverlayNodeAgeSec + 1,
+			want:    true,
+		},
+		{
+			name:    "stale after twenty minutes",
+			version: now - _MaxOverlayNodeAgeSec,
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := tl.Serialize(overlay.NodesList{
+				List: []overlay.Node{{
+					ID:      keys.PublicKeyED25519{Key: pub},
+					Version: int32(tt.version),
+				}},
+			}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			value := &Value{
+				KeyDescription: KeyDescription{
+					UpdateRule: UpdateRuleOverlayNodes{},
+				},
+				Data: data,
+			}
+			if got := isValueAcceptable(value); got != tt.want {
+				t.Fatalf("unexpected acceptability: got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func newCorrectOverlayValue(t *testing.T, wrongOverlayID bool) (*Value, []byte) {
+	t.Helper()
+
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	overlayKey := []byte("test-overlay-key")
+	overlayHash, err := tl.Hash(keys.PublicKeyOverlay{Key: overlayKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	node, err := overlay.NewNode(overlayKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if wrongOverlayID {
+		node.Overlay = bytes.Repeat([]byte{1}, 32)
+		if err = node.Sign(priv); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	data, err := tl.Serialize(overlay.NodesList{
+		List: []overlay.Node{*node},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	val := &Value{
+		KeyDescription: KeyDescription{
+			Key: Key{
+				ID:    overlayHash,
+				Name:  []byte("nodes"),
+				Index: 0,
+			},
+			ID:         keys.PublicKeyOverlay{Key: overlayKey},
+			UpdateRule: UpdateRuleOverlayNodes{},
+		},
+		Data: data,
+		TTL:  int32(time.Now().Unix()),
+	}
+
+	keyID, err := tl.Hash(val.KeyDescription.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return val, keyID
+}

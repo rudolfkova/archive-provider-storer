@@ -1,0 +1,556 @@
+version: "3"
+
+vars:
+  TIMING_DIR: '{{.TIMING_DIR | default (printf "%s/timings" .TASKFILE_DIR)}}'
+  TIMING_RUN_DIR: '{{.TIMING_RUN_DIR | default (printf "%s/.timing-run" .TASKFILE_DIR)}}'
+  TIMING_PID: '{{.TIMING_RUN_DIR}}/service.pid'
+  TIMING_LOG: '{{.TIMING_RUN_DIR}}/service.log'
+  TIMING_BIN: '{{.TIMING_RUN_DIR}}/service'
+  TIMING_CONFIG: '{{.TIMING_CONFIG | default (printf "%s/config.json" .TASKFILE_DIR)}}'
+  TIMING_EXTRA: '{{.TIMING_EXTRA | default ""}}'
+  PROBE_DIR: '{{.PROBE_DIR | default (printf "%s/timings" .TASKFILE_DIR)}}'
+  PROBE_RUN_DIR: '{{.PROBE_RUN_DIR | default (printf "%s/.probe-run" .TASKFILE_DIR)}}'
+  PROBE_PID: '{{.PROBE_RUN_DIR}}/probe.pid'
+  PROBE_LOG: '{{.PROBE_RUN_DIR}}/probe.log'
+  PROBE_BIN: '{{.PROBE_RUN_DIR}}/probe'
+  PROBE_CONFIG: '{{.PROBE_CONFIG | default (printf "%s/config.probe.json" .TASKFILE_DIR)}}'
+  PROBE_EXTRA: '{{.PROBE_EXTRA | default ""}}'
+
+tasks:
+  config:init:
+    desc: Create local config.json from config.example.json (skipped if config.json exists)
+    cmds:
+      - |
+        set -euo pipefail
+        if [ -f "{{.TASKFILE_DIR}}/config.json" ]; then
+          echo "config.json already exists — not overwriting"
+          exit 0
+        fi
+        if [ ! -f "{{.TASKFILE_DIR}}/config.example.json" ]; then
+          echo "config.example.json not found"
+          exit 1
+        fi
+        cp "{{.TASKFILE_DIR}}/config.example.json" "{{.TASKFILE_DIR}}/config.json"
+        echo "created config.json — set wallet_key before starting"
+        echo "  file: {{.TASKFILE_DIR}}/config.json (gitignored)"
+
+  timing:build:
+    desc: Build service binary into .timing-run/service
+    cmds:
+      - mkdir -p {{.TIMING_RUN_DIR}}
+      - go build -trimpath -o {{.TIMING_BIN}} ./cmd/service
+      - |
+        set -euo pipefail
+        if [ -e "{{.TIMING_BIN}}" ] && [ ! -w "{{.TIMING_BIN}}" ]; then
+          echo "warning: {{.TIMING_BIN}} is not writable by $(id -un)"
+          echo "  fix: sudo chown -R $(id -un):$(id -gn) {{.TIMING_RUN_DIR}}"
+        fi
+
+  timing:start:
+    desc: Start archiver in timing-stats mode (-no-tx) in background
+    deps:
+      - timing:build
+    cmds:
+      - |
+        set -euo pipefail
+        BIN='{{.TIMING_BIN}}'
+        PIDFILE='{{.TIMING_PID}}'
+        ME="$(id -un)"
+
+        timing_pids() {
+          local pid owner
+          if [ -f "$PIDFILE" ]; then
+            pid="$(tr -d '[:space:]' <"$PIDFILE")"
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              owner="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')"
+              case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
+                "$BIN"*) echo "$pid"; return 0 ;;
+              esac
+            fi
+          fi
+          pgrep -f "^${BIN} " 2>/dev/null || true
+        }
+
+        mkdir -p "{{.TIMING_RUN_DIR}}" "{{.TIMING_DIR}}"
+        if [ ! -f "{{.TIMING_CONFIG}}" ]; then
+          echo "config not found: {{.TIMING_CONFIG}}"
+          exit 1
+        fi
+        if [ ! -x "$BIN" ]; then
+          echo "binary not executable: $BIN"
+          exit 1
+        fi
+        if [ ! -w "$BIN" ] && [ "$(stat -c '%U' "$BIN" 2>/dev/null || echo '?')" != "$ME" ]; then
+          echo "cannot run $BIN as $ME (wrong owner). fix:"
+          echo "  sudo chown -R $ME:$(id -gn) {{.TIMING_RUN_DIR}}"
+          exit 1
+        fi
+
+        RUNNING="$(timing_pids | head -1 || true)"
+        if [ -n "$RUNNING" ]; then
+          printf '%s\n' "$RUNNING" >"$PIDFILE"
+          echo "timing run already active (pid=$RUNNING)"
+          echo "  log: {{.TIMING_LOG}}"
+          echo "  dir: {{.TIMING_DIR}}"
+          exit 0
+        fi
+        rm -f "$PIDFILE"
+
+        # shellcheck disable=SC2086
+        nohup "$BIN" \
+          -config="{{.TIMING_CONFIG}}" \
+          -timing-stats \
+          -timing-dir="{{.TIMING_DIR}}" \
+          -no-tx \
+          {{.TIMING_EXTRA}} \
+          >>"{{.TIMING_LOG}}" 2>&1 &
+        PID=$!
+        printf '%s\n' "$PID" >"$PIDFILE"
+
+        for _ in $(seq 1 20); do
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "process exited immediately (pid=$PID); see {{.TIMING_LOG}}"
+            rm -f "$PIDFILE"
+            exit 1
+          fi
+          case "$(ps -o args= -p "$PID" 2>/dev/null || true)" in
+            "$BIN"*) break ;;
+          esac
+          sleep 0.1
+        done
+
+        echo "timing run started pid=$PID (user=$ME)"
+        echo "  config: {{.TIMING_CONFIG}}"
+        echo "  log:    {{.TIMING_LOG}}"
+        echo "  stats:  {{.TIMING_DIR}}/"
+        echo "stop with: task timing:stop"
+
+  timing:stop:
+    desc: Stop background timing-stats run
+    cmds:
+      - |
+        set -euo pipefail
+        BIN='{{.TIMING_BIN}}'
+        PIDFILE='{{.TIMING_PID}}'
+        ME="$(id -un)"
+        FAILED=0
+
+        timing_pids() {
+          local pid seen=""
+          if [ -f "$PIDFILE" ]; then
+            pid="$(tr -d '[:space:]' <"$PIDFILE")"
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
+                "$BIN"*) echo "$pid"; seen="$pid" ;;
+              esac
+            fi
+          fi
+          while read -r pid; do
+            [ -n "$pid" ] || continue
+            [ "$pid" = "$seen" ] && continue
+            echo "$pid"
+          done < <(pgrep -f "^${BIN} " 2>/dev/null || true)
+        }
+
+        kill_pid() {
+          local pid="$1"
+          local owner args
+
+          if ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+          fi
+          owner="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')"
+          args="$(ps -o args= -p "$pid" 2>/dev/null || true)"
+          case "$args" in
+            "$BIN"*) ;;
+            *) echo "skip pid=$pid (not timing service)"; return 0 ;;
+          esac
+
+          echo "stopping pid=$pid owner=$owner"
+
+          if kill -KILL "$pid" 2>/dev/null; then
+            :
+          elif [ "$owner" = "$ME" ]; then
+            echo "error: kill -9 pid=$pid failed" >&2
+            return 1
+          elif command -v sudo >/dev/null 2>&1; then
+            echo "pid owned by $owner, using sudo kill -9"
+            if ! sudo kill -KILL "$pid"; then
+              echo "error: sudo kill -9 pid=$pid failed" >&2
+              return 1
+            fi
+          else
+            echo "error: cannot kill pid=$pid (owner=$owner, you are $ME)" >&2
+            echo "  run: sudo kill -9 $pid" >&2
+            return 1
+          fi
+
+          local i=0
+          while kill -0 "$pid" 2>/dev/null; do
+            sleep 0.25
+            i=$((i + 1))
+            if [ "$i" -ge 40 ]; then
+              echo "error: pid=$pid still alive after 10s" >&2
+              return 1
+            fi
+          done
+          echo "stopped pid=$pid"
+        }
+
+        PIDS="$(timing_pids | sort -u)"
+        if [ -z "$PIDS" ]; then
+          rm -f "$PIDFILE"
+          echo "no timing service processes found"
+          exit 0
+        fi
+
+        while read -r pid; do
+          [ -n "$pid" ] || continue
+          if ! kill_pid "$pid"; then
+            FAILED=1
+          fi
+        done <<<"$PIDS"
+
+        rm -f "$PIDFILE"
+
+        REMAINING="$(timing_pids | sort -u)"
+        if [ -n "$REMAINING" ]; then
+          echo "error: timing service still running:" >&2
+          while read -r pid; do
+            [ -n "$pid" ] || continue
+            ps -p "$pid" -o pid=,user=,args= || true
+          done <<<"$REMAINING"
+          exit 1
+        fi
+
+        if [ "$FAILED" -eq 1 ]; then
+          exit 1
+        fi
+        echo "timing service stopped"
+
+  timing:status:
+    desc: Show whether timing-stats run is active
+    cmds:
+      - |
+        set -euo pipefail
+        BIN='{{.TIMING_BIN}}'
+        PIDFILE='{{.TIMING_PID}}'
+
+        timing_pids() {
+          local pid
+          if [ -f "$PIDFILE" ]; then
+            pid="$(tr -d '[:space:]' <"$PIDFILE")"
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
+                "$BIN"*) echo "$pid"; return 0 ;;
+              esac
+            fi
+          fi
+          pgrep -f "^${BIN} " 2>/dev/null || true
+        }
+
+        RUNNING="$(timing_pids || true)"
+        if [ -n "$RUNNING" ]; then
+          echo "status: running"
+          while read -r pid; do
+            [ -n "$pid" ] || continue
+            ps -p "$pid" -o pid=,user=,args=
+          done <<<"$RUNNING"
+          if [ -f "$PIDFILE" ]; then
+            echo "  pid file: $(tr -d '[:space:]' <"$PIDFILE")"
+          fi
+          echo "  log:   {{.TIMING_LOG}}"
+          echo "  stats: {{.TIMING_DIR}}/"
+          if [ -d "{{.TIMING_DIR}}" ]; then
+            echo "  files: $(ls -1 "{{.TIMING_DIR}}" 2>/dev/null | wc -l)"
+          fi
+          exit 0
+        fi
+        echo "status: stopped"
+        if [ -f "$PIDFILE" ]; then
+          echo "  stale pid file: $(tr -d '[:space:]' <"$PIDFILE")"
+          rm -f "$PIDFILE"
+        fi
+
+  timing:logs:
+    desc: Tail timing-stats service log
+    cmds:
+      - |
+        if [ ! -f "{{.TIMING_LOG}}" ]; then
+          echo "no log yet: {{.TIMING_LOG}}"
+          exit 1
+        fi
+        tail -n 100 -f "{{.TIMING_LOG}}"
+
+  timing:summary:
+    desc: List timing summary JSON files
+    cmds:
+      - |
+        if [ ! -d "{{.TIMING_DIR}}" ]; then
+          echo "no timings dir: {{.TIMING_DIR}}"
+          exit 0
+        fi
+        ls -lt "{{.TIMING_DIR}}"/summary-*.json 2>/dev/null || echo "no summary files yet"
+
+  probe:config:init:
+    desc: Create config.probe.json from config.probe.example.json
+    cmds:
+      - |
+        set -euo pipefail
+        if [ -f "{{.TASKFILE_DIR}}/config.probe.json" ]; then
+          echo "config.probe.json already exists — not overwriting"
+          exit 0
+        fi
+        if [ ! -f "{{.TASKFILE_DIR}}/config.probe.example.json" ]; then
+          echo "config.probe.example.json not found"
+          exit 1
+        fi
+        cp "{{.TASKFILE_DIR}}/config.probe.example.json" "{{.TASKFILE_DIR}}/config.probe.json"
+        echo "created config.probe.json"
+
+  probe:build:
+    desc: Build timing-probe binary into .probe-run/probe
+    cmds:
+      - mkdir -p {{.PROBE_RUN_DIR}}
+      - go build -trimpath -o {{.PROBE_BIN}} ./cmd/timing-probe
+      - |
+        set -euo pipefail
+        if [ -e "{{.PROBE_BIN}}" ] && [ ! -w "{{.PROBE_BIN}}" ]; then
+          echo "warning: {{.PROBE_BIN}} is not writable by $(id -un)"
+          echo "  fix: sudo chown -R $(id -un):$(id -gn) {{.PROBE_RUN_DIR}}"
+        fi
+
+  probe:run:
+    desc: Run one timing-probe pass in foreground (-once)
+    deps:
+      - probe:build
+    cmds:
+      - |
+        set -euo pipefail
+        if [ ! -f "{{.PROBE_CONFIG}}" ]; then
+          echo "config not found: {{.PROBE_CONFIG}} (run: task probe:config:init)"
+          exit 1
+        fi
+        mkdir -p "{{.PROBE_DIR}}"
+        # shellcheck disable=SC2086
+        "{{.PROBE_BIN}}" \
+          -config="{{.PROBE_CONFIG}}" \
+          -output-dir="{{.PROBE_DIR}}" \
+          -once \
+          {{.PROBE_EXTRA}}
+
+  probe:start:
+    desc: Start timing-probe daemon in background
+    deps:
+      - probe:build
+    cmds:
+      - |
+        set -euo pipefail
+        BIN='{{.PROBE_BIN}}'
+        PIDFILE='{{.PROBE_PID}}'
+        ME="$(id -un)"
+
+        probe_pids() {
+          local pid
+          if [ -f "$PIDFILE" ]; then
+            pid="$(tr -d '[:space:]' <"$PIDFILE")"
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
+                "$BIN"*) echo "$pid"; return 0 ;;
+              esac
+            fi
+          fi
+          pgrep -f "^${BIN} " 2>/dev/null || true
+        }
+
+        mkdir -p "{{.PROBE_RUN_DIR}}" "{{.PROBE_DIR}}"
+        if [ ! -f "{{.PROBE_CONFIG}}" ]; then
+          echo "config not found: {{.PROBE_CONFIG}}"
+          exit 1
+        fi
+
+        RUNNING="$(probe_pids | head -1 || true)"
+        if [ -n "$RUNNING" ]; then
+          printf '%s\n' "$RUNNING" >"$PIDFILE"
+          echo "probe already active (pid=$RUNNING)"
+          exit 0
+        fi
+        rm -f "$PIDFILE"
+
+        # shellcheck disable=SC2086
+        nohup "$BIN" \
+          -config="{{.PROBE_CONFIG}}" \
+          -output-dir="{{.PROBE_DIR}}" \
+          {{.PROBE_EXTRA}} \
+          >>"{{.PROBE_LOG}}" 2>&1 &
+        PID=$!
+        printf '%s\n' "$PID" >"$PIDFILE"
+
+        for _ in $(seq 1 20); do
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "process exited immediately; see {{.PROBE_LOG}}"
+            rm -f "$PIDFILE"
+            exit 1
+          fi
+          case "$(ps -o args= -p "$PID" 2>/dev/null || true)" in
+            "$BIN"*) break ;;
+          esac
+          sleep 0.1
+        done
+
+        echo "probe started pid=$PID"
+        echo "  log: {{.PROBE_LOG}}"
+        echo "stop with: task probe:stop"
+
+  probe:stop:
+    desc: Stop background timing-probe
+    cmds:
+      - |
+        set -euo pipefail
+        BIN='{{.PROBE_BIN}}'
+        PIDFILE='{{.PROBE_PID}}'
+        ME="$(id -un)"
+        FAILED=0
+
+        probe_pids() {
+          local pid seen=""
+          if [ -f "$PIDFILE" ]; then
+            pid="$(tr -d '[:space:]' <"$PIDFILE")"
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
+                "$BIN"*) echo "$pid"; seen="$pid" ;;
+              esac
+            fi
+          fi
+          while read -r pid; do
+            [ -n "$pid" ] || continue
+            [ "$pid" = "$seen" ] && continue
+            echo "$pid"
+          done < <(pgrep -f "^${BIN} " 2>/dev/null || true)
+        }
+
+        kill_pid() {
+          local pid="$1" owner args
+          if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+          owner="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')"
+          args="$(ps -o args= -p "$pid" 2>/dev/null || true)"
+          case "$args" in "$BIN"*) ;; *) return 0 ;; esac
+          echo "stopping pid=$pid owner=$owner"
+          if kill -KILL "$pid" 2>/dev/null; then : 
+          elif command -v sudo >/dev/null 2>&1; then sudo kill -KILL "$pid"
+          else echo "error: sudo kill -9 $pid" >&2; return 1; fi
+          local i=0
+          while kill -0 "$pid" 2>/dev/null; do
+            sleep 0.25; i=$((i+1))
+            [ "$i" -ge 40 ] && return 1
+          done
+        }
+
+        PIDS="$(probe_pids | sort -u)"
+        if [ -z "$PIDS" ]; then rm -f "$PIDFILE"; echo "no probe processes"; exit 0; fi
+        while read -r pid; do [ -n "$pid" ] || continue; kill_pid "$pid" || FAILED=1; done <<<"$PIDS"
+        rm -f "$PIDFILE"
+        [ "$FAILED" -eq 1 ] && exit 1
+        echo "probe stopped"
+
+  probe:status:
+    desc: Show timing-probe status
+    cmds:
+      - |
+        BIN='{{.PROBE_BIN}}'
+        PIDFILE='{{.PROBE_PID}}'
+        probe_pids() {
+          if [ -f "$PIDFILE" ]; then
+            pid="$(tr -d '[:space:]' <"$PIDFILE")"
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+              case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in "$BIN"*) echo "$pid"; return ;; esac
+            fi
+          fi
+          pgrep -f "^${BIN} " 2>/dev/null || true
+        }
+        RUNNING="$(probe_pids || true)"
+        if [ -n "$RUNNING" ]; then
+          echo "status: running"
+          ps -p "$RUNNING" -o pid=,user=,args=
+          exit 0
+        fi
+        echo "status: stopped"
+
+  probe:logs:
+    desc: Tail timing-probe log
+    cmds:
+      - |
+        if [ ! -f "{{.PROBE_LOG}}" ]; then echo "no log: {{.PROBE_LOG}}"; exit 1; fi
+        tail -n 100 -f "{{.PROBE_LOG}}"
+
+  probe:summary:
+    desc: List probe summary JSON files
+    cmds:
+      - |
+        ls -lt "{{.PROBE_DIR}}"/summary-probe-*.json 2>/dev/null || echo "no probe summaries yet"
+
+  probe:ab:
+    desc: A/B probe — baseline (upstream tonutils-go) then hedge (local replace), then compare
+    cmds:
+      - |
+        set -euo pipefail
+        ROOT='{{.TASKFILE_DIR}}'
+        RUN_DIR='{{.PROBE_RUN_DIR}}'
+        CONFIG='{{.PROBE_CONFIG}}'
+        PROBE_DIR='{{.PROBE_DIR}}'
+        BASELINE_MOD="$ROOT/go.baseline.mod"
+        BASELINE_BIN="$RUN_DIR/probe-baseline"
+        HEDGE_BIN="$RUN_DIR/probe-hedge"
+        COMPARE="$ROOT/scripts/probe_ab_compare.sh"
+
+        if [ ! -f "$CONFIG" ]; then
+          echo "config not found: $CONFIG (run: task probe:config:init)"
+          exit 1
+        fi
+        if [ ! -f "$BASELINE_MOD" ]; then
+          echo "missing $BASELINE_MOD"
+          exit 1
+        fi
+        if [ ! -x "$COMPARE" ]; then
+          chmod +x "$COMPARE" || true
+        fi
+
+        TS="$(date +%s)"
+        AB_DIR="$PROBE_DIR/ab-$TS"
+        mkdir -p "$RUN_DIR" "$AB_DIR/baseline" "$AB_DIR/hedge"
+
+        EXTRA='{{.PROBE_EXTRA}}'
+        if [ -n "${LIMIT_PROVIDERS:-}" ]; then
+          EXTRA="$EXTRA -limit-providers=${LIMIT_PROVIDERS}"
+        fi
+
+        echo "== build baseline (-modfile=go.baseline.mod, upstream tonutils-go) =="
+        go build -trimpath -modfile="$BASELINE_MOD" -o "$BASELINE_BIN" ./cmd/timing-probe
+        echo "  $(go list -modfile="$BASELINE_MOD" -m github.com/xssnick/tonutils-go)"
+
+        echo "== build hedge (go.mod replace -> third_party/tonutils-go) =="
+        go build -trimpath -o "$HEDGE_BIN" ./cmd/timing-probe
+        echo "  $(go list -m github.com/xssnick/tonutils-go)"
+
+        echo "== run baseline =="
+        # shellcheck disable=SC2086
+        "$BASELINE_BIN" \
+          -config="$CONFIG" \
+          -output-dir="$AB_DIR/baseline" \
+          -once \
+          -label=baseline \
+          $EXTRA
+
+        echo "== run hedge =="
+        # shellcheck disable=SC2086
+        "$HEDGE_BIN" \
+          -config="$CONFIG" \
+          -output-dir="$AB_DIR/hedge" \
+          -once \
+          -label=hedge \
+          $EXTRA
+
+        echo "== compare =="
+        "$COMPARE" "$AB_DIR"
+        echo
+        echo "A/B dir: $AB_DIR"

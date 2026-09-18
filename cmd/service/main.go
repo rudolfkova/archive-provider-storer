@@ -16,6 +16,8 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -130,6 +132,8 @@ var noTx = flag.Bool("no-tx", defaultNoTx, "Disable transactions")
 var noRemoveBag = flag.Bool("no-remove-bag", defaultNoRemoveBag, "Not remove bag after header save")
 var skipLiteserverHealthCheck = flag.Bool("skip-liteserver-health-check", defaultSkipLiteserverHealthCheck, "Skip startup lite server masterchain seqno health check")
 var maxLiteserverLag = flag.Uint("max-liteserver-lag", defaultMaxLiteserverLag, "Max lite server masterchain seqno lag behind the best server during startup health check")
+var timingStats = flag.Bool("timing-stats", false, "Record request latency around timeout call sites to logs and JSON under --timing-dir")
+var timingDir = flag.String("timing-dir", "timings", "Directory for timing JSONL/summary files when --timing-stats is set")
 
 var contractBalance, gasFeeAdd, maxPerMB, minRewardToVerify tlb.Coins
 
@@ -456,7 +460,8 @@ type storageAPI interface {
 }
 
 type providerAPI interface {
-	RequestStorageInfo(context.Context, []byte, *address.Address, uint64) (*transport.StorageResponse, error)
+	EnsureConnected(context.Context, []byte) error
+	QueryStorageInfo(context.Context, []byte, *address.Address, uint64) (*transport.StorageResponse, error)
 	GetStorageRates(context.Context, []byte, uint64) (*transport.StorageRatesResponse, error)
 }
 
@@ -471,6 +476,7 @@ type loopDeps struct {
 	httpClient   *http.Client
 	waitMaster   waitMasterFunc
 	sendManyWait sendManyWaitFunc
+	timing       *TimingCollector
 }
 
 func (api freshWalletAPI) CurrentMasterchainInfo(ctx context.Context) (*ton.BlockIDExt, error) {
@@ -502,9 +508,23 @@ func main() {
 
 	log.Logger = zerolog.New(zerolog.NewConsoleWriter()).With().Timestamp().Logger().Level(zerolog.DebugLevel)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	lsCfg, err := liteclient.GetConfigFromUrl(ctx, *networkConfigUrl)
-	cancel()
+	var startupTiming *TimingCollector
+	if *timingStats {
+		startupTiming = newTimingCollector(fmt.Sprintf("startup-%d", time.Now().Unix()))
+	}
+
+	// Контекст с таймаутом на загрузку конфига. Нужен только при старте скрипта. Не успели за таймаут - роняем скрипт и перезапускаем всё заново.
+	var lsCfg *liteclient.GlobalConfig
+	err = timedOp(startupTiming, "network_config", 10*time.Second, TimingFields{}, func(ctx context.Context) error {
+		var e error
+		lsCfg, e = liteclient.GetConfigFromUrl(ctx, *networkConfigUrl)
+		return e
+	})
+	if startupTiming != nil {
+		if _, flushErr := startupTiming.Flush(*timingDir); flushErr != nil {
+			log.Warn().Err(flushErr).Msg("failed to flush startup timing stats")
+		}
+	}
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to get lite client config")
 		return
@@ -559,7 +579,7 @@ func main() {
 		return
 	}
 
-	pClient := transport.NewClient(providerGate, dhtClient)
+	pClient := newStorerProviderClient(providerGate, dhtClient)
 
 	cl := storage.NewClient(*storageUrl, "./provider-store", nil, &storage.Credentials{
 		Login:    *storageLogin,
@@ -567,23 +587,39 @@ func main() {
 	})
 
 	var fromBlock uint32 = 0
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	for {
 		fromBlock, err = doLoop(wl, cl, pClient, api, *indexUrl, "https://mytonprovider.org/api/v1/providers/search", fromBlock)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to do loop")
-			time.Sleep(5 * time.Second)
-			continue
+			select {
+			case <-ctx.Done():
+				log.Info().Msg("shutdown requested")
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
 		}
 
 		log.Info().Msg("loop completed, sleeping 15s")
 
-		time.Sleep(15 * time.Second)
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("shutdown requested")
+			return
+		case <-time.After(15 * time.Second):
+		}
 	}
 }
 
 var addedProviders = make(map[string]time.Time)
 
-func doLoop(wl *wallet.Wallet, storageClient *storage.Client, providerClient *transport.Client, api ton.APIClientWrapped, idxUrl, providersUrl string, fromBlock uint32) (uint32, error) {
+func doLoop(wl *wallet.Wallet, storageClient *storage.Client, providerClient providerAPI, api ton.APIClientWrapped, idxUrl, providersUrl string, fromBlock uint32) (uint32, error) {
+	var timing *TimingCollector
+	if *timingStats {
+		timing = newTimingCollector(fmt.Sprintf("%d", time.Now().Unix()))
+	}
 	return doLoopWithDeps(loopDeps{
 		wallet:       wl,
 		storage:      storageClient,
@@ -592,6 +628,7 @@ func doLoop(wl *wallet.Wallet, storageClient *storage.Client, providerClient *tr
 		httpClient:   &http.Client{Timeout: 10 * time.Second},
 		waitMaster:   waitForMasterchainBlock,
 		sendManyWait: sendManyWaitTransactionFresh,
+		timing:       timing,
 	}, idxUrl, providersUrl, fromBlock)
 }
 
@@ -609,22 +646,52 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 	if deps.sendManyWait == nil {
 		deps.sendManyWait = sendManyWaitTransactionFresh
 	}
+	var notifyWG sync.WaitGroup
+	if deps.timing != nil {
+		defer func() {
+			notifyWG.Wait()
+			if _, flushErr := deps.timing.Flush(*timingDir); flushErr != nil {
+				log.Warn().Err(flushErr).Msg("failed to flush timing stats")
+			}
+		}()
+	}
 
-	loopMaster, err := deps.waitMaster(context.Background(), deps.api, fromBlock)
+	var loopMaster *ton.BlockIDExt
+	err := timedOpCtx(deps.timing, "wait_master", context.Background(), TimingFields{}, func(ctx context.Context) error {
+		var e error
+		loopMaster, e = deps.waitMaster(ctx, deps.api, fromBlock)
+		return e
+	})
 	if err != nil {
 		return fromBlock, fmt.Errorf("failed to get fresh masterchain block: %w", err)
 	}
+	if deps.timing != nil {
+		deps.timing.SetLoopID(fmt.Sprintf("%d-%d", time.Now().Unix(), loopMaster.SeqNo))
+	}
 	log.Info().Uint32("seqno", loopMaster.SeqNo).Uint32("min_seqno", fromBlock).Msg("using masterchain block")
 
-	resp, err := deps.httpClient.Get(idxUrl)
+	httpBudget := 10 * time.Second
+	if deps.httpClient != nil && deps.httpClient.Timeout > 0 {
+		httpBudget = deps.httpClient.Timeout
+	}
+	var idx index.Index
+	err = timedOp(deps.timing, "http_index", httpBudget, TimingFields{}, func(ctx context.Context) error {
+		req, e := http.NewRequestWithContext(ctx, http.MethodGet, idxUrl, nil)
+		if e != nil {
+			return e
+		}
+		resp, e := deps.httpClient.Do(req)
+		if e != nil {
+			return e
+		}
+		defer resp.Body.Close()
+		if e = json.NewDecoder(resp.Body).Decode(&idx); e != nil {
+			return fmt.Errorf("failed to decode index: %w", e)
+		}
+		return nil
+	})
 	if err != nil {
 		return 0, fmt.Errorf("failed to get index: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var idx index.Index
-	if err = json.NewDecoder(resp.Body).Decode(&idx); err != nil {
-		return 0, fmt.Errorf("failed to decode index: %w", err)
 	}
 
 	log.Info().Msg("index downloaded")
@@ -790,7 +857,7 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 
 	log.Info().Msg("fetching providers")
 
-	respProviders, err := deps.httpClient.Post(providersUrl, "application/json", bytes.NewBuffer([]byte(`{
+	providersBody := []byte(`{
 		"filters": {
 			"uptime_gt_percent": 40
 		},
@@ -799,18 +866,29 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 			"order": "desc"
 		},
 		"exact": [],
-		"limit": `+fmt.Sprint(*limitProviders)+`,
+		"limit": ` + fmt.Sprint(*limitProviders) + `,
 		"offset": 0
-	}`)))
+	}`)
+	var providersList MTPResponse
+	err = timedOp(deps.timing, "http_providers", httpBudget, TimingFields{}, func(ctx context.Context) error {
+		req, e := http.NewRequestWithContext(ctx, http.MethodPost, providersUrl, bytes.NewReader(providersBody))
+		if e != nil {
+			return e
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, e := deps.httpClient.Do(req)
+		if e != nil {
+			return e
+		}
+		defer resp.Body.Close()
+		if e = json.NewDecoder(resp.Body).Decode(&providersList); e != nil {
+			return fmt.Errorf("failed to decode providers: %w", e)
+		}
+		return nil
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to fetch providers")
 		return 0, err
-	}
-	defer respProviders.Body.Close()
-
-	var providersList MTPResponse
-	if err = json.NewDecoder(respProviders.Body).Decode(&providersList); err != nil {
-		return 0, fmt.Errorf("failed to decode index: %w", err)
 	}
 
 	for _, p := range providersList.Providers {
@@ -860,9 +938,14 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 		var curProviders []contract.ProviderDataV1
 		var balance tlb.Coins
 		for attempt := 1; attempt <= getProvidersMaxAttempts; attempt++ {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			curProviders, balance, err = contract.GetProvidersV1(ctx, deps.api, loopMaster, addr)
-			cancel()
+			err = timedOp(deps.timing, "get_providers_stats", 10*time.Second, TimingFields{
+				Bag:     dt.BagID,
+				Attempt: attempt,
+			}, func(ctx context.Context) error {
+				var e error
+				curProviders, balance, e = contract.GetProvidersV1(ctx, deps.api, loopMaster, addr)
+				return e
+			})
 			if err == nil || errors.Is(err, contract.ErrNotDeployed) {
 				break
 			}
@@ -959,9 +1042,13 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 
 		log.Info().Str("id", dt.BagID).Str("addr", addr.String()).Msg("getting contract")
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		curProviders, balance, err := contract.GetProvidersV1(ctx, deps.api, loopMaster, addr)
-		cancel()
+		var curProviders []contract.ProviderDataV1
+		var balance tlb.Coins
+		err = timedOp(deps.timing, "get_providers_decide", 10*time.Second, TimingFields{Bag: dt.BagID}, func(ctx context.Context) error {
+			var e error
+			curProviders, balance, e = contract.GetProvidersV1(ctx, deps.api, loopMaster, addr)
+			return e
+		})
 		if err != nil && !errors.Is(err, contract.ErrNotDeployed) {
 			log.Error().Err(err).Str("bag", dt.BagID).Msg("failed to calc contract address")
 			continue
@@ -977,9 +1064,12 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 
 			var suspect bool
 			if !noRespCache[string(prv.Key)] {
-				ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
-				stResp, err := deps.provider.RequestStorageInfo(ctx, prv.Key, addr, toProof)
-				cancel()
+				// Контекст для запроса непосредственно к провайдеру, спрашиваем случайный байт бэга.
+				// Дедлайн - провайдер помечается как ненадёжный для этого прохода. Не получает бэги в этом цикле.
+				stResp, err := runPhasedStorageInfo(deps.timing, "request_storage_info", deps.provider, TimingFields{
+					Bag:      dt.BagID,
+					Provider: hex.EncodeToString(prv.Key),
+				}, prv.Key, addr, toProof)
 				if err != nil {
 					noRespCache[string(prv.Key)] = true
 					suspect = true
@@ -1100,9 +1190,15 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 					continue
 				}
 
-				ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
-				rates, err := deps.provider.GetStorageRates(ctx, prv.ID, dt.BagSize)
-				cancel()
+				var rates *transport.StorageRatesResponse
+				err = timedOp(deps.timing, "get_storage_rates", 15*time.Second, TimingFields{
+					Bag:      dt.BagID,
+					Provider: hex.EncodeToString(prv.ID),
+				}, func(ctx context.Context) error {
+					var e error
+					rates, e = deps.provider.GetStorageRates(ctx, prv.ID, dt.BagSize)
+					return e
+				})
 				if err != nil {
 					noRespCache[string(prv.ID)] = true
 					log.Error().Err(err).Str("bag", dt.BagID).Hex("provider", prv.ID).Msg("failed to get rates")
@@ -1231,7 +1327,12 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 			fromBlock = loopMaster.SeqNo + 1
 		}
 
-		master, err := deps.waitMaster(context.Background(), deps.api, loopMaster.SeqNo)
+		var master *ton.BlockIDExt
+		err = timedOpCtx(deps.timing, "wait_master", context.Background(), TimingFields{}, func(ctx context.Context) error {
+			var e error
+			master, e = deps.waitMaster(ctx, deps.api, loopMaster.SeqNo)
+			return e
+		})
 		if err != nil {
 			log.Error().Err(err).Msg("failed to get masterchain info for tx")
 			return fromBlock, err
@@ -1252,7 +1353,13 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 			return fromBlock, err
 		}
 
-		tx, block, err := deps.sendManyWait(context.Background(), deps.wallet, deps.api, messages, master.SeqNo)
+		var tx *tlb.Transaction
+		var block *ton.BlockIDExt
+		err = timedOpCtx(deps.timing, "send_many_wait", context.Background(), TimingFields{Budget: 180 * time.Second}, func(ctx context.Context) error {
+			var e error
+			tx, block, e = deps.sendManyWait(ctx, deps.wallet, deps.api, messages, master.SeqNo)
+			return e
+		})
 		if err != nil {
 			var timeoutErr *txConfirmationTimeoutError
 			if errors.As(err, &timeoutErr) {
@@ -1266,12 +1373,19 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 		}
 		fromBlock = block.SeqNo + 1
 
+		if deps.timing != nil {
+			notifyWG.Add(1)
+		}
 		go func(notifications []*NotifyProvider) {
+			if deps.timing != nil {
+				defer notifyWG.Done()
+			}
 			time.Sleep(20 * time.Second)
 			for _, notify := range notifications {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				_, err := deps.provider.RequestStorageInfo(ctx, notify.ID, notify.Address, notify.ToProof)
-				cancel()
+				// Контекст для нотификации. Переспрашиваем пруфы у провайдера. При дедлайте по контексту только warning в логах.
+				_, err := runPhasedStorageInfo(deps.timing, "notify_storage_info", deps.provider, TimingFields{
+					Provider: hex.EncodeToString(notify.ID),
+				}, notify.ID, notify.Address, notify.ToProof)
 				if err != nil {
 					log.Warn().Err(err).Hex("provider", notify.ID).Str("addr", notify.Address.String()).Msg("failed send notify to provider")
 				} else {

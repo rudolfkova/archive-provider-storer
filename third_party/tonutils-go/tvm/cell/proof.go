@@ -1,0 +1,407 @@
+package cell
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
+)
+
+type cellHash = []byte
+
+// ProofSkeleton describes the old manual Merkle proof selection tree.
+//
+// Deprecated: use NewMerkleProofBuilder with traced cell loads, or
+// Cell.CreateUsageProof with CellUsageTree.
+type ProofSkeleton struct {
+	recursive bool
+	branches  [4]*ProofSkeleton
+}
+
+// CreateProofSkeleton creates the old manual Merkle proof selection tree.
+//
+// Deprecated: use NewMerkleProofBuilder with traced cell loads, or
+// Cell.CreateUsageProof with CellUsageTree.
+func CreateProofSkeleton() *ProofSkeleton {
+	return &ProofSkeleton{}
+}
+
+// ProofRef - include ref with index i to proof
+//
+// Deprecated: use NewMerkleProofBuilder with traced cell loads, or
+// Cell.CreateUsageProof with CellUsageTree.
+func (s *ProofSkeleton) ProofRef(i int) *ProofSkeleton {
+	if s.branches[i] == nil {
+		s.branches[i] = &ProofSkeleton{}
+	}
+	return s.branches[i]
+}
+
+// SetRecursive - include all underlying refs recursively in ordinary form to proof
+//
+// Deprecated: use NewMerkleProofBuilder with traced cell loads, or
+// Cell.CreateUsageProof with CellUsageTree.
+func (s *ProofSkeleton) SetRecursive() {
+	s.recursive = true
+}
+
+// AttachAt - attach skeleton chain at specific ref slot
+//
+// Deprecated: use NewMerkleProofBuilder with traced cell loads, or
+// Cell.CreateUsageProof with CellUsageTree.
+func (s *ProofSkeleton) AttachAt(i int, sk *ProofSkeleton) {
+	s.branches[i] = sk
+}
+
+// Merge - merge 2 proof chains in a single proof tree
+//
+// Deprecated: use NewMerkleProofBuilder with traced cell loads, or
+// Cell.CreateUsageProof with CellUsageTree.
+func (s *ProofSkeleton) Merge(sk *ProofSkeleton) {
+	for i, v := range sk.branches {
+		if v == nil {
+			continue
+		}
+
+		if s.branches[i] == nil {
+			s.branches[i] = v
+			continue
+		}
+
+		if v.recursive {
+			s.branches[i].SetRecursive()
+			continue
+		}
+		s.branches[i].Merge(v)
+	}
+}
+
+// Copy returns a shallow copy of the old manual Merkle proof selection tree.
+//
+// Deprecated: use NewMerkleProofBuilder with traced cell loads, or
+// Cell.CreateUsageProof with CellUsageTree.
+func (s *ProofSkeleton) Copy() *ProofSkeleton {
+	return &ProofSkeleton{
+		recursive: s.recursive,
+		branches:  s.branches,
+	}
+}
+
+// CreateProof creates a Merkle proof from the old manual proof skeleton.
+//
+// Deprecated: use NewMerkleProofBuilder with traced cell loads, or
+// Cell.CreateUsageProof with CellUsageTree.
+func (c *Cell) CreateProof(skeleton *ProofSkeleton) (*Cell, error) {
+	body, err := buildProofBody(c, skeleton, c.Level())
+	if err != nil {
+		return nil, fmt.Errorf("failed to build proof for cell: %w", err)
+	}
+	return CreateMerkleProof(body)
+}
+
+func buildProofBody(c *Cell, skeleton *ProofSkeleton, merkleDepth int) (*Cell, error) {
+	if c == nil {
+		return nil, fmt.Errorf("cell is nil")
+	}
+	if skeleton == nil {
+		skeleton = CreateProofSkeleton()
+	}
+	if skeleton.recursive && !c.IsVirtualized() {
+		return c, nil
+	}
+
+	refCnt := c.refsCount()
+	if !skeleton.recursive {
+		for i := refCnt; i < len(skeleton.branches); i++ {
+			if skeleton.branches[i] == nil {
+				continue
+			}
+			return nil, fmt.Errorf("failed to peek %d ref: %w", i, ErrNoMoreRefs)
+		}
+	}
+	if refCnt == 0 {
+		return c, nil
+	}
+
+	var refsBuf [4]*Cell
+	refs := refsBuf[:refCnt]
+	refView := newCellRefView(c)
+	childDepth := merkleChildDepth(c, merkleDepth)
+	for i := 0; i < refCnt; i++ {
+		ref, err := refView.boundaryRef(i)
+		if err != nil {
+			return nil, fmt.Errorf("failed to peek %d ref: %w", i, err)
+		}
+
+		var (
+			next *Cell
+		)
+		if skeleton.recursive {
+			ref, err = ref.load()
+			if err != nil {
+				return nil, fmt.Errorf("failed to load %d ref: %w", i, err)
+			}
+			next, err = buildProofBody(ref, skeleton, childDepth)
+			if err != nil {
+				return nil, fmt.Errorf("failed to proof %d ref: %w", i, err)
+			}
+		} else if skeleton.branches[i] != nil {
+			ref, err = ref.load()
+			if err != nil {
+				return nil, fmt.Errorf("failed to load %d ref: %w", i, err)
+			}
+			next, err = buildProofBody(ref, skeleton.branches[i], childDepth)
+			if err != nil {
+				return nil, fmt.Errorf("failed to proof %d ref: %w", i, err)
+			}
+		} else {
+			if ref.GetType() == PrunedCellType {
+				next, err = materializePrunedBranchBoundary(ref)
+				if err != nil {
+					return nil, fmt.Errorf("failed to materialize pruned boundary %d ref: %w", i, err)
+				}
+			} else {
+				next, err = createPrunedBranchFromCell(ref, childDepth+1)
+				if err != nil {
+					return nil, fmt.Errorf("failed to proof %d ref: %w", i, err)
+				}
+			}
+		}
+		refs[i] = next
+	}
+
+	rebuilt, _, err := refView.cloneWithRefs(refs, nil)
+	if err != nil {
+		return nil, err
+	}
+	return rebuilt, nil
+}
+
+func materializePrunedBranchBoundary(c *Cell) (*Cell, error) {
+	if c == nil || c.GetType() != PrunedCellType || !c.IsLazy() || c.IsVirtualized() {
+		return c, nil
+	}
+
+	levelMask := c.getLevelMask()
+	data := c.data
+	if levelMask.GetLevel() == 0 {
+		levelMask = LevelMask{Mask: oneLevelMask(1)}
+		data = append([]byte(nil), c.data...)
+		data[1] = levelMask.Mask
+	}
+
+	out := &Cell{
+		bitsSz: c.bitsSz,
+		data:   data,
+	}
+	out.setSpecial(true)
+	out.setLevelMask(levelMask)
+	if err := validateBoundaryCell(out); err != nil {
+		return nil, err
+	}
+	if err := out.calculateHashes(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateMerkleProof wraps an already-built proof body into a MerkleProof
+// special cell.
+func CreateMerkleProof(body *Cell) (*Cell, error) {
+	builder := BeginCell()
+	if err := builder.StoreUInt(uint64(MerkleProofCellType), 8); err != nil {
+		return nil, fmt.Errorf("failed to store merkle proof type: %w", err)
+	}
+	if err := builder.StoreSlice(body.getHash(0), hashSize*8); err != nil {
+		return nil, fmt.Errorf("failed to store merkle proof hash: %w", err)
+	}
+	if err := builder.StoreUInt(uint64(body.getDepth(0)), depthSize*8); err != nil {
+		return nil, fmt.Errorf("failed to store merkle proof depth: %w", err)
+	}
+	if err := builder.StoreRef(body); err != nil {
+		return nil, fmt.Errorf("failed to store merkle proof ref: %w", err)
+	}
+	return finalizeCellFromBuilder(builder, true)
+}
+
+func CheckProof(proof *Cell, hash []byte) error {
+	_, err := UnwrapProof(proof, hash)
+	return err
+}
+
+func CheckProofVirtualized(proof *Cell, hash []byte) error {
+	_, err := UnwrapProofVirtualized(proof, hash)
+	return err
+}
+
+func UnwrapProof(proof *Cell, hash []byte) (*Cell, error) {
+	if !proof.IsSpecial() || proof.RefsNum() != 1 || proof.BitsSize() != 280 ||
+		Type(proof.data[0]) != MerkleProofCellType {
+		return nil, fmt.Errorf("not a merkle proof cell")
+	}
+
+	if !bytes.Equal(hash, proof.data[1:33]) {
+		return nil, fmt.Errorf("incorrect proof hash")
+	}
+
+	refView := newCellRefView(proof)
+	body, err := refView.boundaryRef(0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load proof body: %w", err)
+	}
+	calcDepth := body.getDepth(0)
+	if calcDepth != binary.BigEndian.Uint16(proof.data[33:]) {
+		return nil, fmt.Errorf("incorrect proof depth")
+	}
+
+	// we unwrap level by 1 to correctly check proofs on pruned cells
+	calcHash := body.getHash(0)
+	if !bytes.Equal(hash, calcHash) {
+		return nil, fmt.Errorf("incorrect proof")
+	}
+	return body, nil
+}
+
+func UnwrapProofVirtualized(proof *Cell, hash []byte) (*Cell, error) {
+	body, err := UnwrapProof(proof, hash)
+	if err != nil {
+		return nil, err
+	}
+	return body.Virtualize(0), nil
+}
+
+func (c *Cell) getHash(level int) []byte {
+	if c.meta != nil && c.meta.viewLevel != 0 {
+		return c.meta.viewOf.getHash(min(level, int(c.meta.viewLevel-1)))
+	}
+
+	hashIndex := c.getLevelMask().Apply(level).getHashIndex()
+
+	if c.GetType() == PrunedCellType {
+		prunedHashIndex := c.getLevelMask().getHashIndex()
+		if hashIndex != prunedHashIndex {
+			// return hash from data
+			return c.data[2+(hashIndex*32) : 2+((hashIndex+1)*32)]
+		}
+		hashIndex = 0
+	}
+
+	return c.hashAt(hashIndex)
+}
+
+// calculateHashes - we are precalculating cell hashes during creation for safe read parallel access later
+func (c *Cell) calculateHashes() error {
+	c.clearVirtualization()
+
+	totalHashCount := c.getLevelMask().getHashIndex() + 1
+	if totalHashCount <= 1 {
+		c.clearExtraHashes()
+	} else {
+		meta := c.ensureMeta()
+		if meta.extraHashes == nil {
+			meta.extraHashes = new([3]Hash)
+		}
+		meta.extraDepths = [3]uint16{}
+	}
+
+	hashCount := totalHashCount
+	typ := c.GetType()
+	if typ == PrunedCellType {
+		hashCount = 1
+	}
+
+	hashIndexOffset := totalHashCount - hashCount
+	hashIndex := 0
+	level := c.getLevelMask().GetLevel()
+	isMerkle := typ == MerkleProofCellType || typ == MerkleUpdateCellType
+	var bodyBuf [maxCellDataBytes]byte
+	var hashBuf [2 + maxCellDataBytes + (4 * depthSize) + (4 * hashSize)]byte
+
+	for levelIndex := 0; levelIndex <= level; levelIndex++ {
+		if !c.getLevelMask().IsSignificant(levelIndex) {
+			continue
+		}
+
+		if levelIndex < hashIndexOffset {
+			hashIndex++
+			continue
+		}
+
+		dsc1, dsc2 := c.descriptors(c.getLevelMask().Apply(levelIndex))
+		hashBuf[0], hashBuf[1] = dsc1, dsc2
+		bufPos := 2
+
+		if hashIndex == hashIndexOffset {
+			if levelIndex != 0 && typ != PrunedCellType {
+				return fmt.Errorf("invalid hash level state")
+			}
+
+			if c.bitsSz%8 == 0 {
+				bufPos += copy(hashBuf[bufPos:], c.data)
+			} else {
+				bodySize := c.SerializeBOCBodyTo(bodyBuf[:])
+				bufPos += copy(hashBuf[bufPos:], bodyBuf[:bodySize])
+			}
+		} else {
+			if levelIndex == 0 || typ == PrunedCellType {
+				return fmt.Errorf("invalid hash level state")
+			}
+			prevHashOff := hashIndex - hashIndexOffset - 1
+			bufPos += copy(hashBuf[bufPos:], c.hashAt(prevHashOff))
+		}
+
+		childLevelIndex := levelIndex
+		if isMerkle {
+			childLevelIndex++
+		}
+
+		var depth uint16
+		refCnt := c.refsCount()
+		for i := 0; i < refCnt; i++ {
+			childDepth := c.refs[i].getDepth(childLevelIndex)
+			binary.BigEndian.PutUint16(hashBuf[bufPos:bufPos+depthSize], childDepth)
+			bufPos += depthSize
+
+			if childDepth > depth {
+				depth = childDepth
+			}
+		}
+		if refCnt > 0 {
+			depth++
+			if depth > maxDepth {
+				return ErrCellDepthLimit
+			}
+		}
+
+		for i := 0; i < refCnt; i++ {
+			bufPos += copy(hashBuf[bufPos:], c.refs[i].getHash(childLevelIndex))
+		}
+
+		off := hashIndex - hashIndexOffset
+		c.setDepthAt(off, depth)
+		sum := sha256.Sum256(hashBuf[:bufPos])
+		c.setHashAt(off, sum[:])
+		hashIndex++
+	}
+
+	return nil
+}
+
+func (c *Cell) getDepth(level int) uint16 {
+	if c.meta != nil && c.meta.viewLevel != 0 {
+		return c.meta.viewOf.getDepth(min(level, int(c.meta.viewLevel-1)))
+	}
+
+	hashIndex := c.getLevelMask().Apply(level).getHashIndex()
+	if c.GetType() == PrunedCellType {
+		prunedHashIndex := c.getLevelMask().getHashIndex()
+		if hashIndex != prunedHashIndex {
+			// return depth from data
+			off := 2 + 32*prunedHashIndex + hashIndex*2
+			return binary.BigEndian.Uint16(c.data[off : off+2])
+		}
+		hashIndex = 0
+	}
+
+	return c.depthAt(hashIndex)
+}

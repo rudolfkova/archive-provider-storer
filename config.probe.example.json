@@ -1,0 +1,6 @@
+{
+  "network_config_url": "https://ton.org/global.config.json",
+  "providers_url": "https://mytonprovider.org/api/v1/providers/search",
+  "limit_providers": 50,
+  "bag_size_bytes": 1073741824
+}

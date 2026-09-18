@@ -1,4 +1,15 @@
 .idea
 main
+
+# Private config — never commit (wallet key, storage credentials)
+config.json
+config.local.json
+
+# Runtime data
+.timing-run/
+.probe-run/
+timings/
+config.probe.json
+bags.json
 *.csv
-*.json
+storage-db/

@@ -647,7 +647,11 @@ func (p *fakeProvider) GetStorageRates(ctx context.Context, provider []byte, siz
 	return p.rates, nil
 }
 
-func (p *fakeProvider) RequestStorageInfo(ctx context.Context, provider []byte, contractAddr *address.Address, byteToProof uint64) (*transport.StorageResponse, error) {
+func (p *fakeProvider) EnsureConnected(ctx context.Context, provider []byte) error {
+	return nil
+}
+
+func (p *fakeProvider) QueryStorageInfo(ctx context.Context, provider []byte, contractAddr *address.Address, byteToProof uint64) (*transport.StorageResponse, error) {
 	p.infoCalls.Add(1)
 	return &transport.StorageResponse{Status: "active"}, nil
 }

@@ -34,3 +34,5 @@ require (
 	golang.org/x/term v0.43.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 )
+
+replace github.com/xssnick/tonutils-go => ./third_party/tonutils-go
