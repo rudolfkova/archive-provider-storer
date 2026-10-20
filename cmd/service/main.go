@@ -984,7 +984,7 @@ func doLoopWithDeps(deps loopDeps, idxUrl, providersUrl string, fromBlock uint32
 					noRespCache[string(prv.Key)] = true
 					suspect = true
 					log.Warn().Err(err).Str("bag", dt.BagID).Hex("provider", prv.Key).Msg("failed to get storage info")
-				} else if stResp.Status != "active" || !verifyStorageProof(mHash, dt.BagSize, stResp.Proof, toProof, dt.PieceSize) {
+				} else if stResp.Status != "warning-balance" && (stResp.Status != "active" || !verifyStorageProof(mHash, dt.BagSize, stResp.Proof, toProof, dt.PieceSize)) {
 					suspect = true
 					log.Debug().Str("bag", dt.BagID).Hex("provider", prv.Key).Str("status", stResp.Status).Str("reason", stResp.Reason).Msg("waiting for bag confirmation")
 				}
