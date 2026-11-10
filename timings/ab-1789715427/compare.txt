@@ -1,0 +1,14 @@
+A/B probe compare
+dir: /home/grach/ton/archive-provider-storer/timings/ab-1789715427
+baseline summary: /home/grach/ton/archive-provider-storer/timings/ab-1789715427/baseline/summary-probe-baseline-1789715429.json
+hedge summary:    /home/grach/ton/archive-provider-storer/timings/ab-1789715427/hedge/summary-probe-hedge-1789715508.json
+
+wall_clock_ms  baseline=78817  hedge=53596  delta(baseline-hedge)=25221ms
+
+storage_rates_connect:
+baseline avg= 2493  p50=  249  p95=10000  max=10001  err=4  to=3
+hedge    avg= 1641  p50=  259  p95=10000  max=10000  err=4  to=2
+
+connect latency buckets:
+baseline  <0.5s=20  0.5-1.5s=0  ~3s=1  ~6s=6  9-10s=3  sum=74.8s
+hedge     <0.5s=20  0.5-1.5s=5  ~3s=0  ~6s=2  9-10s=3  sum=49.3s

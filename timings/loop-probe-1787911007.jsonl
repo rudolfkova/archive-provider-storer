@@ -1,0 +1,10 @@
+{"op":"http_providers","latency_ms":241,"budget_ms":10000,"timed_out":false,"at_unix_ms":1787911007422}
+{"op":"storage_rates_connect","latency_ms":6294,"budget_ms":10000,"timed_out":false,"provider":"84bc16b8ed3f7e11f2f18cc1668c72f8aa672e5723d1eccca61260efbfa80293","attempt":1,"at_unix_ms":1787911013717}
+{"op":"storage_rates_query","latency_ms":192,"budget_ms":10000,"timed_out":false,"provider":"84bc16b8ed3f7e11f2f18cc1668c72f8aa672e5723d1eccca61260efbfa80293","attempt":1,"at_unix_ms":1787911013909}
+{"op":"storage_rates_connect","latency_ms":189,"budget_ms":10000,"timed_out":false,"provider":"4d4f01a4234d839cabbe81f97fcde8f74408c8f164b1e4a07da3d7f08ba569a8","attempt":1,"at_unix_ms":1787911014099}
+{"op":"storage_rates_query","latency_ms":147,"budget_ms":10000,"timed_out":false,"provider":"4d4f01a4234d839cabbe81f97fcde8f74408c8f164b1e4a07da3d7f08ba569a8","attempt":1,"at_unix_ms":1787911014247}
+{"op":"storage_rates_connect","latency_ms":6120,"budget_ms":10000,"timed_out":false,"provider":"3a65231e59031a3a0c6f363030712730b11562a3c77556184c05d58adeb6b466","attempt":1,"at_unix_ms":1787911020367}
+{"op":"storage_rates_query","latency_ms":54,"budget_ms":10000,"timed_out":false,"provider":"3a65231e59031a3a0c6f363030712730b11562a3c77556184c05d58adeb6b466","attempt":1,"at_unix_ms":1787911020422}
+{"op":"storage_rates_connect","latency_ms":10000,"budget_ms":10000,"timed_out":true,"error":"failed to find storage-provider in dht of 30f167a33cdbb78ef5997b7134be8f7d0469742244dc0c6ff4ab70214e886d48: context deadline exceeded","provider":"30f167a33cdbb78ef5997b7134be8f7d0469742244dc0c6ff4ab70214e886d48","attempt":1,"at_unix_ms":1787911030422}
+{"op":"storage_rates_connect","latency_ms":3180,"budget_ms":10000,"timed_out":false,"provider":"3d11c40a1fe54d2b69cf1f8280ce7294ae4c1c7c98ddcc73653a3cf35a1b65af","attempt":1,"at_unix_ms":1787911033603}
+{"op":"storage_rates_query","latency_ms":140,"budget_ms":10000,"timed_out":false,"provider":"3d11c40a1fe54d2b69cf1f8280ce7294ae4c1c7c98ddcc73653a3cf35a1b65af","attempt":1,"at_unix_ms":1787911033744}

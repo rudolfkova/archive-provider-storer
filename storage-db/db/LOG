@@ -1,0 +1,100 @@
+=============== Aug 28, 2026 (MSK) ===============
+10:46:42.141415 log@legend F·NumFile S·FileSize N·Entry C·BadEntry B·BadBlock Ke·KeyError D·DroppedEntry L·Level Q·SeqNum T·TimeElapsed
+10:46:42.148065 db@open opening
+10:46:42.149062 version@stat F·[] S·0B[] Sc·[]
+10:46:42.151186 db@janitor F·2 G·0
+10:46:42.151250 db@open done T·3.149569ms
+10:50:58.695566 memdb@flush N·891886 S·63MiB
+10:50:58.918345 memdb@flush created L0@3 N·891886 S·12MiB "bag..\x93Ҡ,d668396":"upl..\n\x83\xb6,v77973"
+10:50:58.918605 version@stat F·[1] S·12MiB[12MiB] Sc·[0.25]
+10:50:58.919639 memdb@flush committed F·1 T·223.629145ms
+10:50:58.929583 journal@remove removed @1
+10:52:45.714809 memdb@flush N·875019 S·63MiB
+10:52:45.914958 memdb@flush created L0@5 N·875019 S·12MiB "bag..NM\xc5,d1423431":"upl..\xfa\xe9v,v1419325"
+10:52:45.914999 version@stat F·[2] S·24MiB[24MiB] Sc·[0.50]
+10:52:45.916068 memdb@flush committed F·1 T·201.203581ms
+10:52:45.928400 journal@remove removed @2
+10:52:57.171929 table@compaction L0·2 -> L1·0 S·24MiB Q·1869863
+10:52:57.506652 table@build created L1@6 N·11 S·56KiB "bag..\x1c\xe6C,v1738147":"bag..\xa4yn,v1750459"
+10:52:57.506716 version@stat F·[0 1] S·56KiB[0B 56KiB] Sc·[0.00 0.00]
+10:52:57.507736 table@compaction committed F-1 S-24MiB Ke·0 D·1766894 T·335.731482ms
+10:53:02.060079 table@remove removed @5
+10:53:02.062466 table@remove removed @3
+10:56:01.875413 memdb@flush N·1337027 S·63MiB
+10:56:02.151758 memdb@flush created L0@8 N·1337027 S·9MiB "bag..\xb5D\x90,d2117584":"upl..XyO,v1853318"
+10:56:02.151805 version@stat F·[1 1] S·9MiB[9MiB 56KiB] Sc·[0.25 0.00]
+10:56:02.152713 memdb@flush committed F·1 T·277.27426ms
+10:56:02.168322 journal@remove removed @4
+10:57:52.972431 memdb@flush N·1376193 S·63MiB
+10:57:53.228010 memdb@flush created L0@10 N·1376193 S·9MiB "bag..\xc8\xf6\xef,d4396642":"upl..P\xfa\xf7,v4251838"
+10:57:53.228054 version@stat F·[2 1] S·18MiB[18MiB 56KiB] Sc·[0.50 0.00]
+10:57:53.228876 memdb@flush committed F·1 T·252.745538ms
+10:57:53.242363 journal@remove removed @7
+10:57:55.596686 table@compaction L0·2 -> L1·1 S·18MiB Q·4525304
+10:57:56.027402 table@build created L1@11 N·10 S·63KiB "bag..6#\xe0,v4479829":"bag..(\xc7\xeb,v4479831"
+10:57:56.027449 version@stat F·[0 1] S·63KiB[0B 63KiB] Sc·[0.00 0.00]
+10:57:56.028266 table@compaction committed F-2 S-18MiB Ke·0 D·2713221 T·431.537206ms
+10:57:59.374392 table@remove removed @10
+10:57:59.379094 table@remove removed @8
+10:57:59.379223 table@remove removed @6
+10:59:50.495118 memdb@flush N·1337197 S·63MiB
+10:59:50.854801 memdb@flush created L0@13 N·1337197 S·9MiB "bag..\x9a\xdf\xe8,v5813213":"upl..\xb1\xaf|,v5413409"
+10:59:50.854841 version@stat F·[1 1] S·9MiB[9MiB 63KiB] Sc·[0.25 0.00]
+10:59:50.855783 memdb@flush committed F·1 T·360.508449ms
+10:59:50.861576 journal@remove removed @9
+11:01:38.908723 memdb@flush N·1212828 S·63MiB
+11:01:39.189272 memdb@flush created L0@15 N·1212828 S·10MiB "bag..a\xe5r,d6435556":"upl..[\x80\xc3,v5916264"
+11:01:39.189323 version@stat F·[2 1] S·19MiB[19MiB 63KiB] Sc·[0.50 0.00]
+11:01:39.190264 memdb@flush committed F·1 T·277.835913ms
+11:01:39.193623 journal@remove removed @12
+11:01:42.594468 table@compaction L0·2 -> L1·1 S·19MiB Q·7073169
+11:01:43.077443 table@build created L1@16 N·10 S·56KiB "bag..\x15\xd8\xd3,v7027921":"bag..\xba66,v6962086"
+11:01:43.077504 version@stat F·[0 1] S·56KiB[0B 56KiB] Sc·[0.00 0.00]
+11:01:43.078557 table@compaction committed F-2 S-19MiB Ke·0 D·2550025 T·484.041821ms
+11:01:48.299328 table@remove removed @15
+11:01:48.302731 table@remove removed @13
+11:01:48.302862 table@remove removed @11
+11:02:45.146766 memdb@flush N·1210179 S·63MiB
+11:02:45.450418 memdb@flush created L0@18 N·1210179 S·10MiB "bag..\x9e\xf1\",d7406490":"upl..\xba66,v7036150"
+11:02:45.450465 version@stat F·[1 1] S·10MiB[10MiB 56KiB] Sc·[0.25 0.00]
+11:02:45.452294 memdb@flush committed F·1 T·305.466552ms
+11:02:45.469388 journal@remove removed @14
+11:03:34.990987 memdb@flush N·1290590 S·63MiB
+11:03:35.314095 memdb@flush created L0@20 N·1290590 S·9MiB "bag..'\xb8\x87,d8995568":"upl..h\n7,v8560197"
+11:03:35.314156 version@stat F·[2 1] S·20MiB[20MiB 56KiB] Sc·[0.50 0.00]
+11:03:35.315133 memdb@flush committed F·1 T·324.094769ms
+11:03:35.327163 journal@remove removed @17
+11:03:37.806939 table@compaction L0·2 -> L1·1 S·20MiB Q·9611514
+11:03:38.328906 table@build created L1@21 N·9 S·56KiB "bag..\x00J:,v9521159":"bag.. c\xe2,v9507699"
+11:03:38.328987 version@stat F·[0 1] S·56KiB[0B 56KiB] Sc·[0.00 0.00]
+11:03:38.330728 table@compaction committed F-2 S-20MiB Ke·0 D·2500770 T·523.727424ms
+11:03:41.365386 table@remove removed @20
+11:03:41.370660 table@remove removed @18
+11:03:41.370824 table@remove removed @16
+11:04:11.743347 memdb@flush N·1121727 S·63MiB
+11:04:12.027089 memdb@flush created L0@23 N·1121727 S·10MiB "bag..\xa4\x15\x02,d9980788":"upl..\xbb\xd6 ,v9824927"
+11:04:12.027141 version@stat F·[1 1] S·10MiB[10MiB 56KiB] Sc·[0.25 0.00]
+11:04:12.027936 memdb@flush committed F·1 T·284.542123ms
+11:04:12.038198 journal@remove removed @19
+11:04:57.658217 memdb@flush N·1095860 S·63MiB
+11:04:57.923614 memdb@flush created L0@25 N·1095860 S·10MiB "bag..]\xdc\x05,d11194900":"upl..\xc0Qh,v10710896"
+11:04:57.923672 version@stat F·[2 1] S·21MiB[21MiB 56KiB] Sc·[0.50 0.00]
+11:04:57.924611 memdb@flush committed F·1 T·266.342249ms
+11:04:57.946881 journal@remove removed @22
+11:05:01.779692 table@compaction L0·2 -> L1·1 S·21MiB Q·11826496
+11:05:02.288376 table@build created L1@26 N·10 S·56KiB "bag..f\xafo,v11736260":"bag..\xdc\xda6,v11703459"
+11:05:02.288429 version@stat F·[0 1] S·56KiB[0B 56KiB] Sc·[0.00 0.00]
+11:05:02.289343 table@compaction committed F-2 S-21MiB Ke·0 D·2217586 T·509.606684ms
+11:05:03.314099 table@remove removed @25
+11:05:03.317640 table@remove removed @23
+11:05:03.318132 table@remove removed @21
+11:05:53.829235 memdb@flush N·1153299 S·63MiB
+11:05:54.082995 memdb@flush created L0@28 N·1153299 S·10MiB "bag..\xc3j\x06,d12638605":"upl..\x1c\xb3\x98,v12835262"
+11:05:54.083035 version@stat F·[1 1] S·10MiB[10MiB 56KiB] Sc·[0.25 0.00]
+11:05:54.083939 memdb@flush committed F·1 T·254.660133ms
+11:05:54.099737 journal@remove removed @24
+11:06:19.368880 memdb@flush N·1424787 S·63MiB
+11:06:19.765470 memdb@flush created L0@30 N·1424787 S·12MiB "bag..\xa2\xf6C,d13290646":"upl..\xe5\rZ,v12981682"
+11:06:19.765510 version@stat F·[2 1] S·22MiB[22MiB 56KiB] Sc·[0.50 0.00]
+11:06:19.772299 memdb@flush committed F·1 T·403.359373ms
+11:06:19.788016 journal@remove removed @27
